@@ -26,7 +26,8 @@ function readVint(buffer: Uint8Array, start: number): Vint | null {
 
   let value = firstByte & (mask - 1);
   for (let i = 1; i < length; i++) {
-    value = (value << 8) | buffer[start + i];
+    // Use multiplication instead of bitwise << 8 to prevent 32-bit signed integer overflow
+    value = value * 256 + buffer[start + i];
   }
 
   return { length, value };
@@ -182,7 +183,7 @@ export async function fixWebmDuration(blob: Blob, durationMs: number): Promise<B
     if (elId.id === ID_TIMECODESCALE) {
       let tc = 0;
       for (let i = 0; i < elSize.value; i++) {
-        tc = (tc << 8) | headBuffer[offset + i];
+        tc = tc * 256 + headBuffer[offset + i];
       }
       if (tc > 0) timecodeScale = tc;
       offset += elSize.value;

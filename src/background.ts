@@ -399,7 +399,12 @@ chrome.commands?.onCommand.addListener(async (command) => {
       try {
         await ensureOffscreen();
         const captureInfo = await getStreamIdForTab(tab.id);
-        const r = await postToOffscreen({ type: 'OFFSCREEN_START', streamId: captureInfo.streamId, source: captureInfo.source, meetingId: 'google-meet' });
+        let meetingId = 'google-meet';
+        if (tab.url) {
+          const pathParts = new URL(tab.url).pathname.split('/');
+          meetingId = pathParts[pathParts.length - 1] || 'google-meet';
+        }
+        const r = await postToOffscreen({ type: 'OFFSCREEN_START', streamId: captureInfo.streamId, source: captureInfo.source, meetingId });
         if (r?.ok) {
           activeRecordingTabId = tab.id;
           activeRecordingStartTime = Date.now();

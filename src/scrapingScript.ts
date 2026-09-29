@@ -620,6 +620,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg?.type === 'RESET_TRANSCRIPT') {
     prior.clear();
+    lastSeen.clear();
     transcriptBuffer.length = 0;
     sendResponse({ ok: true });
     return false;

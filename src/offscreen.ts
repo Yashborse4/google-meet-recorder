@@ -505,15 +505,18 @@ function cleanupStreams() {
 }
 
 function stopRecording() {
-  if (!mediaRecorder || !capturing) {
-    log('Stop called but not recording');
-    throw new Error('Not currently recording');
+  if (!mediaRecorder) {
+    log('Stop called but no mediaRecorder instance exists');
+    return;
   }
   try {
     if (mediaRecorder.state === 'recording') {
       try { mediaRecorder.requestData(); } catch {}
+      mediaRecorder.stop();
+      log('mediaRecorder.stop() successfully executed');
+    } else {
+      log(`stopRecording called but mediaRecorder state is already ${mediaRecorder.state}`);
     }
-    mediaRecorder.stop();
   } catch (e) {
     log('Error stopping mediaRecorder', e);
     throw e;
