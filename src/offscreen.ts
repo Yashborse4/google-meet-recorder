@@ -19,6 +19,9 @@ window.addEventListener('error', (e) => {
 window.addEventListener('unhandledrejection', (e: any) => {
   console.error('[offscreen] unhandledrejection', e?.reason || e);
 });
+window.addEventListener('beforeunload', () => {
+  cleanupStreams();
+});
 console.log('[offscreen] script loaded');
 
 // Port plumbing

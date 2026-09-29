@@ -442,6 +442,41 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
+  if (msg?.type === 'CHECK_MIC_PERMISSION') {
+    chrome.storage.local.get('micPermissionGranted', (res) => {
+      sendResponse({ granted: !!res?.micPermissionGranted });
+    });
+    return true;
+  }
+
+  if (msg?.type === 'REQUEST_MIC_PERMISSION') {
+    const setupUrl = chrome.runtime.getURL('micsetup.html');
+    try {
+      chrome.windows.create({
+        url: setupUrl,
+        type: 'popup',
+        width: 440,
+        height: 380,
+        focused: true,
+      });
+    } catch {
+      chrome.tabs.create({ url: setupUrl });
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (msg?.type === 'MIC_PERMISSION_GRANTED') {
+    chrome.storage.local.set({ micPermissionGranted: true }).catch(() => {});
+    chrome.tabs.query({ url: 'https://meet.google.com/*' }, (tabs) => {
+      tabs.forEach((t) => {
+        if (t.id) chrome.tabs.sendMessage(t.id, { type: 'MIC_PERMISSION_GRANTED' }).catch(() => {});
+      });
+    });
+    sendResponse({ ok: true });
+    return false;
+  }
+
   // 2. Asynchronous handlers (return true to keep message port open)
   if (msg?.type === 'START_RECORDING') {
     handleStartRecording(msg, sender, sendResponse);
@@ -557,6 +592,22 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
       }
     } catch (e) {
       bglog('Failed to auto-stop on tab close:', e);
+    }
+  }
+});
+
+// Auto-finalize recording and release microphone if recorded tab navigates away from Google Meet
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
+  if (tabId === activeRecordingTabId && lastKnownRecording && changeInfo.url) {
+    if (!changeInfo.url.includes('meet.google.com')) {
+      bglog(`Recorded tab ${tabId} navigated away from Google Meet (${changeInfo.url}). Auto-stopping recording and releasing mic...`);
+      try {
+        if (offscreenPort) {
+          await postToOffscreen({ type: 'OFFSCREEN_STOP' });
+        }
+      } catch (e) {
+        bglog('Failed to auto-stop on tab navigation:', e);
+      }
     }
   }
 });

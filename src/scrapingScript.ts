@@ -117,6 +117,10 @@ function createFloatingBadge() {
         70% { transform: scale(1.15); opacity: 1; box-shadow: 0 0 0 8px rgba(234, 67, 53, 0); }
         100% { transform: scale(0.95); opacity: 0.8; box-shadow: 0 0 0 0 rgba(234, 67, 53, 0); }
       }
+      @keyframes gmeet-rec-slide-in {
+        from { transform: translateY(-12px); opacity: 0; }
+        to { transform: translateY(0); opacity: 1; }
+      }
       .gmeet-rec-btn-hover:hover {
         background-color: rgba(234, 67, 53, 0.15) !important;
       }
@@ -467,6 +471,97 @@ const rootObserver = new MutationObserver((mutations) => {
   }
 });
 
+// --- Mic Permission Guidance on Meet link open ---
+let micBannerDismissed = false;
+
+function showMicPermissionBanner() {
+  if (micBannerDismissed || document.getElementById('gmeet-rec-mic-prompt')) return;
+
+  const banner = document.createElement('div');
+  banner.id = 'gmeet-rec-mic-prompt';
+  banner.style.cssText = `
+    position: fixed;
+    top: 18px;
+    right: 20px;
+    z-index: 2147483647;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: #202124;
+    border: 1px solid rgba(234, 67, 53, 0.7);
+    color: #ffffff;
+    padding: 10px 16px;
+    border-radius: 10px;
+    font-family: 'Google Sans', Roboto, Arial, sans-serif;
+    font-size: 13px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    animation: gmeet-rec-slide-in 0.25s ease-out;
+  `;
+
+  banner.innerHTML = `
+    <span style="font-size: 18px;">🎙️</span>
+    <div style="display: flex; flex-direction: column; gap: 2px;">
+      <span style="font-weight: 600; color: #ffffff;">Record your voice</span>
+      <span style="font-size: 11px; color: #9aa0a6;">Allow microphone access for Meet Recorder</span>
+    </div>
+    <button id="gmeet-rec-btn-allow-mic" style="
+      background: #ea4335;
+      color: #ffffff;
+      border: none;
+      padding: 6px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 6px;
+      cursor: pointer;
+      white-space: nowrap;
+      margin-left: 4px;
+    ">Allow Mic</button>
+    <button id="gmeet-rec-btn-dismiss-mic" style="
+      background: transparent;
+      color: #9aa0a6;
+      border: none;
+      font-size: 16px;
+      cursor: pointer;
+      padding: 2px 6px;
+      line-height: 1;
+    " title="Dismiss">✕</button>
+  `;
+
+  document.body.appendChild(banner);
+
+  document.getElementById('gmeet-rec-btn-allow-mic')?.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'REQUEST_MIC_PERMISSION' }).catch(() => {});
+  });
+
+  document.getElementById('gmeet-rec-btn-dismiss-mic')?.addEventListener('click', () => {
+    micBannerDismissed = true;
+    banner.remove();
+  });
+}
+
+function removeMicPermissionBanner() {
+  const b = document.getElementById('gmeet-rec-mic-prompt');
+  if (b) {
+    b.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
+    b.style.opacity = '0';
+    b.style.transform = 'translateY(-10px)';
+    setTimeout(() => b.remove(), 300);
+  }
+}
+
+function checkAndPromptMicPermission() {
+  const path = window.location.pathname;
+  const isMeetCall = path.length > 5 && path !== '/' && !path.startsWith('/landing');
+  if (!isMeetCall) return;
+
+  chrome.runtime.sendMessage({ type: 'CHECK_MIC_PERMISSION' }, (res) => {
+    if (chrome.runtime.lastError) return;
+    if (!res?.granted) {
+      showMicPermissionBanner();
+    }
+  });
+}
+
 // Init on DOM ready
 function init() {
   createFloatingBadge();
@@ -475,6 +570,9 @@ function init() {
 
   // Immediately detect mute state so we don't assume unmuted if user joins already muted
   checkMeetMuteState();
+
+  // Prompt for microphone permission if user opened a Meet call and hasn't granted yet
+  checkAndPromptMicPermission();
 
   // Query background for active recording state
   try {
@@ -504,6 +602,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'RECORDING_STATE') {
     if (msg.startedAt) recordingStartTime = msg.startedAt;
     updateRecordingUI(!!msg.recording);
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (msg?.type === 'MIC_PERMISSION_GRANTED') {
+    removeMicPermissionBanner();
     sendResponse({ ok: true });
     return false;
   }

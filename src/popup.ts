@@ -185,6 +185,9 @@ async function refreshMicButton() {
     const status = await (navigator as any).permissions.query({ name: 'microphone' });
     const set = () => {
       const granted = status.state === 'granted';
+      if (granted) {
+        chrome.storage.local.set({ micPermissionGranted: true }).catch(() => {});
+      }
       micBtn.textContent = granted ? '✓ Active' : status.state === 'denied' ? 'Blocked' : 'Enable';
       micBtn.disabled = granted;
       if (granted) {
@@ -344,6 +347,8 @@ micBtn?.addEventListener('click', async () => {
     try {
       const s = await navigator.mediaDevices.getUserMedia({ audio: true });
       s.getTracks().forEach((t) => t.stop());
+      await chrome.storage.local.set({ micPermissionGranted: true });
+      chrome.runtime.sendMessage({ type: 'MIC_PERMISSION_GRANTED' }).catch(() => {});
       alert('Microphone enabled for the extension.');
       await refreshMicButton();
     } catch {
