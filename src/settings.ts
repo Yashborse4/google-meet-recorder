@@ -25,18 +25,51 @@ const STORAGE_KEY = 'meet_recorder_settings';
 
 export async function getSettings(): Promise<ExtensionSettings> {
   return new Promise((resolve) => {
+    // Safety timeout: resolve with defaults if storage is completely broken
+    const fallbackTimer = setTimeout(() => resolve({ ...DEFAULT_SETTINGS }), 3000);
+
+    const resolveWith = (data: any) => {
+      clearTimeout(fallbackTimer);
+      resolve({ ...DEFAULT_SETTINGS, ...(data || {}) });
+    };
+
     try {
-      chrome.storage?.sync?.get(STORAGE_KEY, (res) => {
-        if (chrome.runtime.lastError || !res?.[STORAGE_KEY]) {
-          chrome.storage?.local?.get(STORAGE_KEY, (localRes) => {
-            resolve({ ...DEFAULT_SETTINGS, ...(localRes?.[STORAGE_KEY] || {}) });
-          });
-        } else {
-          resolve({ ...DEFAULT_SETTINGS, ...res[STORAGE_KEY] });
-        }
-      });
+      if (chrome.storage?.sync?.get) {
+        chrome.storage.sync.get(STORAGE_KEY, (res) => {
+          if (chrome.runtime.lastError || !res?.[STORAGE_KEY]) {
+            // Fallback to local storage
+            try {
+              if (chrome.storage?.local?.get) {
+                chrome.storage.local.get(STORAGE_KEY, (localRes) => {
+                  if (chrome.runtime.lastError) {
+                    resolveWith(null);
+                  } else {
+                    resolveWith(localRes?.[STORAGE_KEY]);
+                  }
+                });
+              } else {
+                resolveWith(null);
+              }
+            } catch {
+              resolveWith(null);
+            }
+          } else {
+            resolveWith(res[STORAGE_KEY]);
+          }
+        });
+      } else if (chrome.storage?.local?.get) {
+        chrome.storage.local.get(STORAGE_KEY, (localRes) => {
+          if (chrome.runtime.lastError) {
+            resolveWith(null);
+          } else {
+            resolveWith(localRes?.[STORAGE_KEY]);
+          }
+        });
+      } else {
+        resolveWith(null);
+      }
     } catch {
-      resolve(DEFAULT_SETTINGS);
+      resolveWith(null);
     }
   });
 }

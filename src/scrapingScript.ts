@@ -286,6 +286,9 @@ const KNOWN_CAPTION_TEXT_CLASSES = ['.ygicle', '.nMcdL .ygicle'];
 const KNOWN_SPEAKER_CLASSES = ['.NWpY1d'];
 const KNOWN_CAPTION_CONTAINER_CLASSES = ['.nMcdL'];
 
+// Track per-node MutationObservers to prevent leaks during long meetings
+const captionNodeObservers: Set<MutationObserver> = new Set();
+
 function scanCaptionNode(cl: HTMLElement) {
   let txtNode: HTMLElement | null = null;
   let speakerName = 'Speaker';
@@ -333,13 +336,19 @@ function scanCaptionNode(cl: HTMLElement) {
   };
 
   push();
-  new MutationObserver(push).observe(txtNode, { childList: true, subtree: true, characterData: true });
+  const obs = new MutationObserver(push);
+  obs.observe(txtNode, { childList: true, subtree: true, characterData: true });
+  captionNodeObservers.add(obs);
 }
 
 let captionRegionObserver: MutationObserver | null = null;
 
 function launchCaptionRegionObserver(region: HTMLElement) {
   captionRegionObserver?.disconnect();
+
+  // Disconnect all existing per-node observers to prevent accumulation
+  captionNodeObservers.forEach((obs) => { try { obs.disconnect(); } catch {} });
+  captionNodeObservers.clear();
 
   captionRegionObserver = new MutationObserver((mutations) => {
     mutations.forEach((mutation) => {
@@ -463,6 +472,9 @@ function init() {
   createFloatingBadge();
 
   rootObserver.observe(document.body, { childList: true, subtree: true });
+
+  // Immediately detect mute state so we don't assume unmuted if user joins already muted
+  checkMeetMuteState();
 
   // Query background for active recording state
   try {

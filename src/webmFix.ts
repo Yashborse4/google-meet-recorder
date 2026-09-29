@@ -35,7 +35,9 @@ function readVint(buffer: Uint8Array, start: number): Vint | null {
 function writeVint(value: number, minLength = 1): Uint8Array {
   let length = minLength;
   for (let i = 1; i <= 8; i++) {
-    const maxVal = (1 << (7 * i)) - 2;
+    // Use Math.pow instead of bitwise shift: `1 << (7 * i)` wraps at i >= 5
+    // because JS bitwise operators operate on 32-bit signed integers.
+    const maxVal = Math.pow(2, 7 * i) - 2;
     if (value <= maxVal) {
       length = Math.max(i, minLength);
       break;

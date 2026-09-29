@@ -392,7 +392,7 @@ startBtn?.addEventListener('click', async () => {
     } catch (tabErr: any) {
       console.warn('[popup] tabCapture.getMediaStreamId failed, trying desktopCapture prompt:', tabErr);
       streamId = await new Promise<string>((resolve, reject) => {
-        chrome.desktopCapture.chooseDesktopMedia(['tab', 'audio'], (id?: string) => {
+        chrome.desktopCapture.chooseDesktopMedia(['tab', 'audio'], tab, (id?: string) => {
           const err = chrome.runtime.lastError;
           if (err) return reject(new Error(err.message));
           if (!id) return reject(new Error('Sharing was cancelled'));

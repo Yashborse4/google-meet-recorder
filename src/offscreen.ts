@@ -27,6 +27,8 @@ function log(...a: any[]) {
   console.log('[offscreen]', ...a);
 }
 
+let portReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
 function connectPort(): chrome.runtime.Port {
   try {
     portRef?.disconnect();
@@ -35,9 +37,25 @@ function connectPort(): chrome.runtime.Port {
   p.onDisconnect.addListener(() => {
     log('Port disconnected');
     portRef = null;
+    // Auto-reconnect after a short delay if still active
+    if (capturing && !portReconnectTimer) {
+      portReconnectTimer = setTimeout(() => {
+        portReconnectTimer = null;
+        log('Auto-reconnecting port after disconnect...');
+        try { connectPort(); } catch (e) { log('Port auto-reconnect failed:', e); }
+      }, 1000);
+    }
   });
-  p.postMessage({ type: 'OFFSCREEN_READY' });
-  log('READY signaled via Port');
+  // Small delay to let background's onConnect listener attach its message handler
+  // before we send OFFSCREEN_READY
+  setTimeout(() => {
+    try {
+      p.postMessage({ type: 'OFFSCREEN_READY' });
+      log('READY signaled via Port');
+    } catch (e) {
+      log('Failed to signal READY:', e);
+    }
+  }, 50);
   portRef = p;
   attachRpcListener(p);
   return p;
@@ -81,6 +99,8 @@ let micGainNode: GainNode | null = null;
 let currentMicTrack: MediaStreamTrack | null = null;
 let currentMixedStream: MediaStream | null = null;
 
+let isMeetMuted = false;
+
 // Microphone capture
 async function maybeGetMicStream(): Promise<MediaStream | null> {
   if (!WANT_MIC_MIX) return null;
@@ -112,8 +132,13 @@ async function maybeGetMicStream(): Promise<MediaStream | null> {
  *
  * CRITICAL PRIVACY & COMFORT CONSTRAINT:
  * Mic audio is NEVER connected to audioContext.destination to prevent sidetone feedback loops.
+ *
+ * ECHO PREVENTION:
+ * When source is 'desktop', Chrome does NOT mute the tab's native audio output,
+ * so we must NOT route tab audio to audioContext.destination (speakers) — only to the recorder.
+ * When source is 'tab', Chrome auto-mutes the tab, so we route to speakers so user can hear.
  */
-async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream | null): Promise<MediaStream> {
+async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream | null, source: 'tab' | 'desktop' = 'tab'): Promise<MediaStream> {
   const tabAudio = tabStream.getAudioTracks()[0];
   const videoTracks = tabStream.getVideoTracks();
 
@@ -142,11 +167,17 @@ async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream |
   if (tabAudio) {
     try {
       const tabSource = audioContext.createMediaStreamSource(new MediaStream([tabAudio]));
-      // Route to local speakers so user can hear participants
-      tabSource.connect(audioContext.destination);
-      // Route to recorder destination
+      // Only route to local speakers when using tabCapture (Chrome auto-mutes the tab).
+      // With desktopCapture, the tab still plays audio natively — routing to speakers would echo.
+      if (source === 'tab') {
+        tabSource.connect(audioContext.destination);
+        log('Tab audio connected to speakers (tabCapture: tab is auto-muted by Chrome)');
+      } else {
+        log('Tab audio NOT connected to speakers (desktopCapture: tab still plays natively, would echo)');
+      }
+      // Always route to recorder destination
       tabSource.connect(mixedDest);
-      log('Tab audio connected to speakers and recorder destination');
+      log('Tab audio connected to recorder destination');
     } catch (err) {
       log('Tab audio source connection failed; using raw tab audio', err);
       return tabStream;
@@ -161,12 +192,14 @@ async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream |
       try {
         const micSource = audioContext.createMediaStreamSource(new MediaStream([micTrack]));
         micGainNode = audioContext.createGain();
-        micGainNode.gain.value = 1.0; // unmuted by default
+        // Respect current Google Meet mute state (prevents "hot mic" on start if user joined muted)
+        micGainNode.gain.value = isMeetMuted ? 0 : 1.0;
+        currentMicTrack.enabled = !isMeetMuted;
 
         micSource.connect(micGainNode);
         // Connect exclusively to recorder destination. NEVER connect to audioContext.destination!
         micGainNode.connect(mixedDest);
-        log('Mic audio connected to GainNode and recorder destination (sidetone prevented)');
+        log(`Mic audio connected (sidetone prevented, initial state: ${isMeetMuted ? 'MUTED' : 'UNMUTED'})`);
       } catch (err) {
         log('Mic audio routing failed:', err);
       }
@@ -225,13 +258,22 @@ async function captureWithStreamId(streamId: string, source: 'tab' | 'desktop'):
   }
 }
 
-async function prepareAndRecord(baseStream: MediaStream, meetingId: string): Promise<void> {
+async function prepareAndRecord(baseStream: MediaStream, meetingId: string, source: 'tab' | 'desktop' = 'tab'): Promise<void> {
   const videoTracks = baseStream.getVideoTracks();
   if (!videoTracks.length) throw new Error('No video track found in captured stream');
 
+  // CRITICAL: Set contentHint = 'detail' on all video tracks so that Chrome's
+  // video encoder prioritizes text, fine lines, and slide presentations over motion smoothing
+  for (const track of videoTracks) {
+    if ('contentHint' in track) {
+      (track as any).contentHint = 'detail';
+      log('Video track contentHint set to "detail" (presentation and text clarity optimized)');
+    }
+  }
+
   const settings = await getSettings();
   const micStream = await maybeGetMicStream();
-  const mixedStream = await setupAudioMixing(baseStream, micStream);
+  const mixedStream = await setupAudioMixing(baseStream, micStream, source);
   currentMixedStream = mixedStream;
 
   // Final check on AudioContext
@@ -239,19 +281,30 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string): Pro
     await audioContext.resume().catch(() => {});
   }
 
-  // Codec selection priority for maximum clarity:
-  // 1. VP9 (Google's high-efficiency codec: razor-sharp text & slides for lectures)
-  // 2. MP4 (H.264: universal compatibility)
-  // 3. VP8 (standard fallback)
+  // Audio-aware Codec Selection
+  const hasAudio = mixedStream.getAudioTracks().length > 0;
   let mime = 'video/webm';
-  if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')) {
-    mime = 'video/webm;codecs=vp9,opus';
-  } else if (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1,mp4a.40.2')) {
-    mime = 'video/mp4;codecs=avc1,mp4a.40.2';
-  } else if (MediaRecorder.isTypeSupported('video/mp4')) {
-    mime = 'video/mp4';
-  } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')) {
-    mime = 'video/webm;codecs=vp8,opus';
+  if (hasAudio) {
+    // Priority: VP9 (sharp slides/text) -> MP4 (H.264) -> VP8
+    if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')) {
+      mime = 'video/webm;codecs=vp9,opus';
+    } else if (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1,mp4a.40.2')) {
+      mime = 'video/mp4;codecs=avc1,mp4a.40.2';
+    } else if (MediaRecorder.isTypeSupported('video/mp4')) {
+      mime = 'video/mp4';
+    } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')) {
+      mime = 'video/webm;codecs=vp8,opus';
+    }
+  } else {
+    // Video-only stream fallback: omit audio codecs to prevent MediaRecorder initialization failure
+    log('Stream has no audio tracks; selecting video-only container codec');
+    if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
+      mime = 'video/webm;codecs=vp9';
+    } else if (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1')) {
+      mime = 'video/mp4;codecs=avc1';
+    } else if (MediaRecorder.isTypeSupported('video/webm')) {
+      mime = 'video/webm';
+    }
   }
 
   // Initialize unique session in MeetRecorderDB
@@ -260,7 +313,7 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string): Pro
   chunkSequence = 0;
 
   await recorderDB.createSession(activeSessionId, meetingId, mime);
-  log(`Created recording session in IndexedDB: ${activeSessionId} (${mime})`);
+  log(`Created recording session in IndexedDB: ${activeSessionId} (${mime}, hasAudio=${hasAudio})`);
 
   const bitRates: Record<string, number> = {
     '720p': 2_500_000,
@@ -269,11 +322,18 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string): Pro
   };
   const videoBitsPerSecond = bitRates[settings.videoQuality] || 8_000_000;
 
-  mediaRecorder = new MediaRecorder(mixedStream, {
+  const recorderOptions: MediaRecorderOptions = {
     mimeType: mime,
     videoBitsPerSecond,
-    audioBitsPerSecond: 192_000,
-  });
+  };
+  if (hasAudio) {
+    recorderOptions.audioBitsPerSecond = 192_000;
+  }
+
+  mediaRecorder = new MediaRecorder(mixedStream, recorderOptions);
+
+  // Track pending IndexedDB chunk write promises to guarantee 100% data integrity on stop
+  const pendingChunkWrites = new Set<Promise<void>>();
 
   const started = new Promise<void>((resolve, reject) => {
     const startTimeout = setTimeout(() => reject(new Error('MediaRecorder did not start (timeout)')), 5000);
@@ -301,9 +361,15 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string): Pro
       if (e.data && e.data.size > 0 && activeSessionId) {
         const seq = chunkSequence++;
         const currentId = activeSessionId;
-        recorderDB.writeChunk(currentId, seq, e.data).catch((err) => {
-          log(`Failed to write chunk seq=${seq} to IndexedDB:`, err);
-        });
+        const writePromise = recorderDB.writeChunk(currentId, seq, e.data);
+        pendingChunkWrites.add(writePromise);
+        writePromise
+          .catch((err) => {
+            log(`Failed to write chunk seq=${seq} to IndexedDB:`, err);
+          })
+          .finally(() => {
+            pendingChunkWrites.delete(writePromise);
+          });
       }
     };
 
@@ -314,6 +380,13 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string): Pro
 
       try {
         if (!finishedSessionId) throw new Error('No active session ID on stop');
+
+        // CRITICAL: Await all in-flight chunk writes so final seconds are never truncated
+        if (pendingChunkWrites.size > 0) {
+          log(`Flushing ${pendingChunkWrites.size} in-flight chunk write(s) before assembly...`);
+          await Promise.all(Array.from(pendingChunkWrites));
+          log('All chunk writes committed to IndexedDB');
+        }
 
         await recorderDB.updateSessionStatus(finishedSessionId, 'FINALIZING', Date.now());
 
@@ -382,6 +455,7 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string): Pro
       } catch (err) {
         log('Finalization error:', err);
       } finally {
+        pendingChunkWrites.clear();
         cleanupStreams();
         capturing = false;
         activeSessionId = null;
@@ -458,7 +532,7 @@ function attachRpcListener(port: chrome.runtime.Port): void {
             return respond(msg, { ok: false, error: 'Already recording' });
           }
           const baseStream = await captureWithStreamId(streamId, source);
-          await prepareAndRecord(baseStream, meetingId);
+          await prepareAndRecord(baseStream, meetingId, source);
           return respond(msg, { ok: true, sessionId: activeSessionId });
         } catch (e: any) {
           return respond(msg, { ok: false, error: `${e?.name || 'Error'}: ${e?.message || e}` });
@@ -485,6 +559,7 @@ function attachRpcListener(port: chrome.runtime.Port): void {
       // FR-AV-3: Google Meet Mute Sync
       if (msg?.type === 'MEET_MUTE_TOGGLED') {
         const isMuted = !!msg.isMuted;
+        isMeetMuted = isMuted;
         log(`Meet mute event received: ${isMuted ? 'MUTED' : 'UNMUTED'}`);
         if (micGainNode && audioContext) {
           micGainNode.gain.setValueAtTime(isMuted ? 0 : 1, audioContext.currentTime);
@@ -556,6 +631,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
     if (msg?.type === 'MEET_MUTE_TOGGLED') {
       const isMuted = !!msg.isMuted;
+      isMeetMuted = isMuted;
       if (micGainNode && audioContext) {
         micGainNode.gain.setValueAtTime(isMuted ? 0 : 1, audioContext.currentTime);
       }

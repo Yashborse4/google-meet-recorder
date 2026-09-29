@@ -104,12 +104,12 @@ async function ensureOffscreen(): Promise<void> {
     bglog('Creating offscreen document…');
     await chrome.offscreen.createDocument({
       url: chrome.runtime.getURL('offscreen.html'),
-      reasons: ['BLOBS', 'AUDIO_PLAYBACK', 'USER_MEDIA', 'DISPLAY_MEDIA'],
+      reasons: ['BLOBS', 'AUDIO_PLAYBACK', 'USER_MEDIA'] as any[],
       justification: 'Record tab audio+video in offscreen using MediaRecorder and Web Audio API',
     });
   }
 
-  for (let i = 0; i < 15 && !(offscreenPort && offscreenReady); i++) {
+  for (let i = 0; i < 30 && !(offscreenPort && offscreenReady); i++) {
     try {
       const res = await chrome.runtime.sendMessage({ type: 'OFFSCREEN_PING' });
       if (res?.ok) {
@@ -126,7 +126,7 @@ async function ensureOffscreen(): Promise<void> {
     } catch {}
   }
 
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 100; i++) {
     if (offscreenPort && offscreenReady) return;
     await wait(100);
   }
@@ -172,7 +172,8 @@ chrome.runtime.onConnect.addListener((port) => {
 
         const downloadTranscripts = () => {
           // 1. Download readable plain-text transcript (.txt)
-          const txtUrl = msg.txtDataUrl || msg.txtBlobUrl;
+          // Prefer blob URL: data URLs can exceed Chromium's ~2MB limit on long meetings
+          const txtUrl = msg.txtBlobUrl || msg.txtDataUrl;
           if (txtUrl && settings.saveTxtTranscript) {
             chrome.downloads.download(
               {
@@ -183,6 +184,21 @@ chrome.runtime.onConnect.addListener((port) => {
               (txtId) => {
                 if (chrome.runtime.lastError) {
                   bglog('TXT transcript download error:', chrome.runtime.lastError.message);
+                  // Retry with data URL fallback if blob URL failed
+                  if (msg.txtDataUrl && txtUrl !== msg.txtDataUrl) {
+                    bglog('Retrying TXT download with data URL fallback...');
+                    chrome.downloads.download(
+                      { url: msg.txtDataUrl, filename: txtFilename, saveAs: false },
+                      (retryId) => {
+                        if (chrome.runtime.lastError) {
+                          bglog('TXT data URL fallback also failed:', chrome.runtime.lastError.message);
+                        } else {
+                          bglog(`TXT transcript download (fallback) initiated, id=${retryId}`);
+                          chrome.runtime.sendMessage({ type: 'TRANSCRIPT_SAVED', filename: txtFilename }).catch(() => {});
+                        }
+                      }
+                    );
+                  }
                 } else {
                   bglog(`TXT transcript download initiated, id=${txtId}`);
                   chrome.runtime.sendMessage({ type: 'TRANSCRIPT_SAVED', filename: txtFilename }).catch(() => {});
@@ -192,7 +208,8 @@ chrome.runtime.onConnect.addListener((port) => {
           }
 
           // 2. Download WebVTT subtitle track (.vtt)
-          const vttUrl = msg.vttDataUrl || msg.vttBlobUrl;
+          // Prefer blob URL: data URLs can exceed Chromium's ~2MB limit on long meetings
+          const vttUrl = msg.vttBlobUrl || msg.vttDataUrl;
           if (vttUrl && settings.saveVttSubtitles) {
             chrome.downloads.download(
               {
@@ -203,6 +220,20 @@ chrome.runtime.onConnect.addListener((port) => {
               (vttId) => {
                 if (chrome.runtime.lastError) {
                   bglog('VTT subtitle download error:', chrome.runtime.lastError.message);
+                  // Retry with data URL fallback if blob URL failed
+                  if (msg.vttDataUrl && vttUrl !== msg.vttDataUrl) {
+                    bglog('Retrying VTT download with data URL fallback...');
+                    chrome.downloads.download(
+                      { url: msg.vttDataUrl, filename: vttFilename, saveAs: false },
+                      (retryId) => {
+                        if (chrome.runtime.lastError) {
+                          bglog('VTT data URL fallback also failed:', chrome.runtime.lastError.message);
+                        } else {
+                          bglog(`VTT subtitle download (fallback) initiated, id=${retryId}`);
+                        }
+                      }
+                    );
+                  }
                 } else {
                   bglog(`VTT subtitle download initiated, id=${vttId}`);
                 }
@@ -280,22 +311,38 @@ function postToOffscreen(msg: any): Promise<any> {
     const id = Math.random().toString(36).slice(2);
     msg.__id = id;
 
+    let settled = false;
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      try {
+        offscreenPort?.onMessage.removeListener(listener);
+      } catch {}
+    };
+
     const listener = (m: any) => {
       if (m && m.__respFor === id) {
-        offscreenPort!.onMessage.removeListener(listener);
+        cleanup();
         resolve(m.payload);
       }
     };
 
     offscreenPort.onMessage.addListener(listener);
-    offscreenPort.postMessage(msg);
 
+    try {
+      offscreenPort.postMessage(msg);
+    } catch (e) {
+      cleanup();
+      reject(new Error(`Failed to post to offscreen: ${e}`));
+      return;
+    }
+
+    // 30s timeout: getUserMedia + AudioContext + MediaRecorder.start() can take
+    // a while on first use or slower machines (permission dialogs, cold start)
     setTimeout(() => {
-      try {
-        offscreenPort!.onMessage.removeListener(listener);
-      } catch {}
+      cleanup();
       reject(new Error('Offscreen response timeout'));
-    }, 15000);
+    }, 30000);
   });
 }
 
