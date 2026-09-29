@@ -283,6 +283,40 @@ class RecorderDatabase {
     return vtt;
   }
 
+  /**
+   * Generates a human-readable timestamped plain text transcript from stored captions.
+   */
+  public async generatePlainText(sessionId: string): Promise<string> {
+    const captions = await this.getCaptions(sessionId);
+    if (!captions.length) return 'No captions recorded for this session.\n';
+
+    const session = await this.getSession(sessionId);
+    const dateStr = session ? new Date(session.startedAt).toLocaleString() : new Date().toLocaleString();
+    const meetingTitle = session?.meetingId || 'Google Meet';
+
+    let txt = `Google Meet Transcript - ${meetingTitle}\n`;
+    txt += `Date: ${dateStr}\n`;
+    txt += `Session: ${sessionId}\n`;
+    txt += '------------------------------------------------------------\n\n';
+
+    const formatTime = (ms: number): string => {
+      const totalSec = Math.floor(ms / 1000);
+      const hours = Math.floor(totalSec / 3600);
+      const mins = Math.floor((totalSec % 3600) / 60);
+      const secs = totalSec % 60;
+      if (hours > 0) {
+        return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+      }
+      return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    };
+
+    for (const c of captions) {
+      txt += `[${formatTime(c.relativeTimeMs)}] ${c.speaker}: ${c.text}\n`;
+    }
+
+    return txt;
+  }
+
   // --- Storage Cleanup ---
 
   public async deleteSession(sessionId: string): Promise<void> {

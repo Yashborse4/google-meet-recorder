@@ -100,9 +100,11 @@ A local-first, privacy-respecting Chrome Extension engineered to capture Google 
     * **Tier 3 (Structural Heuristics):** Observe repeating participant caption nodes inside the active caption container.
 * **FR-CAP-2: Caption Persistence**
   * Scraped captions (speaker name, formatted text, absolute timestamp, relative video offset) are streamed directly to the `captions` store in `MeetRecorderDB`.
-* **FR-CAP-3: WebVTT / SRT Subtitle Export**
-  * Upon recording completion, compile the session's caption records into a standard `.vtt` file.
-  * Trigger an automated download of `GoogleMeet-Transcript-[meetingId]-[timestamp].vtt` alongside the primary video recording.
+* **FR-CAP-3: Automated Dual Transcript (.txt) & Subtitle (.vtt) Export**
+  * Upon saving the video recording, automatically compile and download:
+    1. Human-readable meeting transcript: `GoogleMeet-Transcript-[meetingId]-[timestamp].txt`
+    2. Synchronized WebVTT subtitle track: `GoogleMeet-Transcript-[meetingId]-[timestamp].vtt`
+  * Both the video recording and the meeting transcript are downloaded automatically in a single unified action, eliminating any need for separate manual export.
 
 ---
 
@@ -180,3 +182,25 @@ interface CaptionRecord {
   text: string;
 }
 ```
+
+---
+
+## 4. Extension Configuration & Settings Architecture (`src/settings.ts`)
+
+* **Storage Engine:** Chrome Sync Storage (`chrome.storage.sync`) with automatic fallback to Local Storage (`chrome.storage.local`).
+* **Schema Definition:**
+```typescript
+interface ExtensionSettings {
+  saveVideo: boolean;           // Automatically download video file on stop (default: true)
+  saveTxtTranscript: boolean;   // Automatically download plain-text transcript on stop (default: true)
+  saveVttSubtitles: boolean;    // Automatically download WebVTT subtitle track on stop (default: true)
+  videoQuality: '1080p' | '720p' | 'max'; // Dynamic constraint & bitrate profiles
+  autoMixMic: boolean;          // Auto-mix local microphone into recording stream
+  noiseSuppression: boolean;    // Hardware echo cancellation & noise suppression
+  autoStopOnExit: boolean;      // Auto-finalize recording on call disconnect or tab close
+}
+```
+* **UI Integration:**
+  * Embedded in-extension Configuration panel (`#view-settings`) accessible via header gear icon.
+  * Direct toggle switches and quality dropdown with immediate reactive persistence.
+  * Streamlined main popup UI with the redundant manual transcript button removed in favor of automated dual saving.

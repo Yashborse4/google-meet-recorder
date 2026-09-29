@@ -3,29 +3,173 @@
 // - Orphan / Crash Recovery detection (MeetRecorderDB)
 // - Microphone permission priming & verification
 // - Manual Start / Stop tab recording controls
-// - Manual Transcript download
+// - Real-time recording duration and session timer
+// - In-extension settings & preferences configuration
 
 import { recorderDB, SessionRecord } from './db';
 import { fixWebmDuration } from './webmFix';
+import { getSettings, saveSettings, ExtensionSettings } from './settings';
 
-const saveBtn = document.getElementById('save') as HTMLButtonElement | null;
+// Recording UI elements
 const micBtn = document.getElementById('enable-mic') as HTMLButtonElement | null;
+const micDesc = document.getElementById('mic-desc') as HTMLDivElement | null;
 const startBtn = document.getElementById('start-rec') as HTMLButtonElement | null;
 const stopBtn = document.getElementById('stop-rec') as HTMLButtonElement | null;
+
+const statusPill = document.getElementById('status-pill') as HTMLDivElement | null;
+const statusText = document.getElementById('status-text') as HTMLSpanElement | null;
+const timerCard = document.getElementById('timer-card') as HTMLDivElement | null;
+const timerDigits = document.getElementById('timer-digits') as HTMLDivElement | null;
+const startTimeInfo = document.getElementById('start-time-info') as HTMLDivElement | null;
 
 const recoveryCard = document.getElementById('recovery-card') as HTMLDivElement | null;
 const recoveryMsg = document.getElementById('recovery-msg') as HTMLParagraphElement | null;
 const recoverBtn = document.getElementById('recover-btn') as HTMLButtonElement | null;
 const discardBtn = document.getElementById('discard-btn') as HTMLButtonElement | null;
 
-function setUI(recording: boolean) {
+// Settings & View Navigation elements
+const viewMain = document.getElementById('view-main') as HTMLDivElement | null;
+const viewSettings = document.getElementById('view-settings') as HTMLDivElement | null;
+const btnSettingsToggle = document.getElementById('btn-settings-toggle') as HTMLButtonElement | null;
+const btnSettingsBack = document.getElementById('btn-settings-back') as HTMLButtonElement | null;
+
+const settingSaveVideo = document.getElementById('setting-save-video') as HTMLInputElement | null;
+const settingSaveTxt = document.getElementById('setting-save-txt') as HTMLInputElement | null;
+const settingSaveVtt = document.getElementById('setting-save-vtt') as HTMLInputElement | null;
+const settingVideoQuality = document.getElementById('setting-video-quality') as HTMLSelectElement | null;
+const settingAutoMic = document.getElementById('setting-auto-mic') as HTMLInputElement | null;
+const settingNoiseSuppression = document.getElementById('setting-noise-suppression') as HTMLInputElement | null;
+const settingAutoStop = document.getElementById('setting-auto-stop') as HTMLInputElement | null;
+const btnClearCache = document.getElementById('btn-clear-cache') as HTMLButtonElement | null;
+
+let liveTimerInterval: number | null = null;
+
+function formatDuration(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const hrs = Math.floor(totalSec / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+  if (hrs > 0) {
+    return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+}
+
+function setUI(recording: boolean, startedAt?: number) {
   if (!startBtn || !stopBtn) return;
   startBtn.disabled = recording;
   stopBtn.disabled = !recording;
+
+  if (recording) {
+    startBtn.style.display = 'none';
+    stopBtn.style.display = 'flex';
+    if (statusPill) statusPill.classList.add('recording');
+    if (statusText) statusText.textContent = 'REC LIVE';
+    if (timerCard) timerCard.classList.add('active');
+
+    const effectiveStart = startedAt && startedAt > 0 ? startedAt : Date.now();
+    if (startTimeInfo) {
+      const timeStr = new Date(effectiveStart).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      startTimeInfo.innerHTML = `Started at: <strong>${timeStr}</strong>`;
+    }
+
+    if (!liveTimerInterval) {
+      const updateTimer = () => {
+        const elapsed = Date.now() - effectiveStart;
+        if (timerDigits) timerDigits.textContent = formatDuration(elapsed);
+      };
+      updateTimer();
+      liveTimerInterval = window.setInterval(updateTimer, 1000);
+    }
+  } else {
+    startBtn.style.display = 'flex';
+    stopBtn.style.display = 'none';
+    if (statusPill) statusPill.classList.remove('recording');
+    if (statusText) statusText.textContent = 'Idle';
+    if (timerCard) timerCard.classList.remove('active');
+    if (timerDigits) timerDigits.textContent = '00:00';
+    if (startTimeInfo) startTimeInfo.innerHTML = 'Started at: <strong>--:--</strong>';
+
+    if (liveTimerInterval) {
+      clearInterval(liveTimerInterval);
+      liveTimerInterval = null;
+    }
+  }
 }
 
 function toast(msg: string) {
   console.log('[popup]', msg);
+}
+
+// Navigation between Main and Settings Views
+function showSettings(show: boolean) {
+  if (show) {
+    viewMain?.classList.add('hidden');
+    viewSettings?.classList.remove('hidden');
+  } else {
+    viewSettings?.classList.add('hidden');
+    viewMain?.classList.remove('hidden');
+  }
+}
+
+btnSettingsToggle?.addEventListener('click', () => {
+  const isSettingsVisible = !viewSettings?.classList.contains('hidden');
+  showSettings(!isSettingsVisible);
+});
+
+btnSettingsBack?.addEventListener('click', () => {
+  showSettings(false);
+});
+
+// Settings synchronization
+async function initSettings() {
+  const current = await getSettings();
+
+  if (settingSaveVideo) settingSaveVideo.checked = current.saveVideo;
+  if (settingSaveTxt) settingSaveTxt.checked = current.saveTxtTranscript;
+  if (settingSaveVtt) settingSaveVtt.checked = current.saveVttSubtitles;
+  if (settingVideoQuality) settingVideoQuality.value = current.videoQuality;
+  if (settingAutoMic) settingAutoMic.checked = current.autoMixMic;
+  if (settingNoiseSuppression) settingNoiseSuppression.checked = current.noiseSuppression;
+  if (settingAutoStop) settingAutoStop.checked = current.autoStopOnExit;
+
+  const saveCurrent = async () => {
+    const updated: ExtensionSettings = {
+      saveVideo: settingSaveVideo ? settingSaveVideo.checked : true,
+      saveTxtTranscript: settingSaveTxt ? settingSaveTxt.checked : true,
+      saveVttSubtitles: settingSaveVtt ? settingSaveVtt.checked : true,
+      videoQuality: (settingVideoQuality?.value as any) || '1080p',
+      autoMixMic: settingAutoMic ? settingAutoMic.checked : true,
+      noiseSuppression: settingNoiseSuppression ? settingNoiseSuppression.checked : true,
+      autoStopOnExit: settingAutoStop ? settingAutoStop.checked : true,
+    };
+    await saveSettings(updated);
+    toast('Settings saved');
+  };
+
+  [settingSaveVideo, settingSaveTxt, settingSaveVtt, settingAutoMic, settingNoiseSuppression, settingAutoStop].forEach(
+    (el) => el?.addEventListener('change', saveCurrent)
+  );
+  settingVideoQuality?.addEventListener('change', saveCurrent);
+
+  btnClearCache?.addEventListener('click', async () => {
+    if (confirm('Clear all cached session recordings from local storage?')) {
+      try {
+        const orphaned = await recorderDB.getOrphanedSessions();
+        for (const s of orphaned) {
+          await recorderDB.deleteSession(s.sessionId);
+        }
+        if (recoveryCard) recoveryCard.style.display = 'none';
+        pendingRecoverySession = null;
+        if (btnClearCache) btnClearCache.textContent = '✓ Cache Cleared';
+        setTimeout(() => {
+          if (btnClearCache) btnClearCache.textContent = '🗑️ Clear Cached Sessions';
+        }, 2000);
+      } catch (e) {
+        alert(`Error clearing cache: ${e}`);
+      }
+    }
+  });
 }
 
 // Open full tab to grant mic permissions
@@ -40,17 +184,15 @@ async function refreshMicButton() {
     // @ts-ignore
     const status = await (navigator as any).permissions.query({ name: 'microphone' });
     const set = () => {
-      micBtn.textContent =
-        status.state === 'granted'
-          ? 'Microphone Enabled ✓'
-          : status.state === 'denied'
-          ? 'Microphone Blocked'
-          : 'Enable Microphone';
-      micBtn.disabled = status.state === 'granted';
-      if (status.state === 'granted') {
-        micBtn.classList.add('success');
+      const granted = status.state === 'granted';
+      micBtn.textContent = granted ? '✓ Active' : status.state === 'denied' ? 'Blocked' : 'Enable';
+      micBtn.disabled = granted;
+      if (granted) {
+        micBtn.classList.add('granted');
+        if (micDesc) micDesc.textContent = 'Your voice is recorded & mixed';
       } else {
-        micBtn.classList.remove('success');
+        micBtn.classList.remove('granted');
+        if (micDesc) micDesc.textContent = 'Permission needed to record your voice';
       }
     };
     set();
@@ -65,7 +207,7 @@ async function checkOrphanedRecordings() {
   try {
     const orphaned = await recorderDB.getOrphanedSessions();
     if (orphaned.length > 0) {
-      pendingRecoverySession = orphaned[0]; // Recover most recent
+      pendingRecoverySession = orphaned[0];
       const dateStr = new Date(pendingRecoverySession.startedAt).toLocaleTimeString();
       const approxDurationSec = (pendingRecoverySession.chunkCount || 1) * 5;
 
@@ -88,38 +230,55 @@ recoverBtn?.addEventListener('click', async () => {
     const sess = pendingRecoverySession;
     const approxDurationMs = Math.max(1000, (sess.chunkCount || 1) * 5000);
 
-    // Assemble Blob from IndexedDB chunks
-    const rawBlob = await recorderDB.assembleSessionBlob(sess.sessionId, sess.mimeType || 'video/webm');
-    // Patch EBML duration
-    const seekableBlob = await fixWebmDuration(rawBlob, approxDurationMs);
+    const mime = sess.mimeType || 'video/webm';
+    const rawBlob = await recorderDB.assembleSessionBlob(sess.sessionId, mime);
 
-    // Subtitle transcript
+    let seekableBlob = rawBlob;
+    if (mime.includes('webm')) {
+      seekableBlob = await fixWebmDuration(rawBlob, approxDurationMs);
+    }
+
+    // Subtitle transcript & Plain Text transcript
     const vttContent = await recorderDB.generateWebVTT(sess.sessionId);
     const vttBlob = new Blob([vttContent], { type: 'text/vtt' });
 
+    const txtContent = await recorderDB.generatePlainText(sess.sessionId);
+    const txtBlob = new Blob([txtContent], { type: 'text/plain' });
+
     const videoUrl = URL.createObjectURL(seekableBlob);
     const vttUrl = URL.createObjectURL(vttBlob);
+    const txtUrl = URL.createObjectURL(txtBlob);
 
     const suffix = sess.meetingId || 'recovered';
     const timestamp = Date.now();
+    const ext = mime.includes('mp4') ? 'mp4' : 'webm';
 
     chrome.downloads.download({
       url: videoUrl,
-      filename: `GoogleMeet-Recovered-${suffix}-${timestamp}.webm`,
+      filename: `GoogleMeet-Recovered-${suffix}-${timestamp}.${ext}`,
       saveAs: true,
+    }, () => {
+      chrome.downloads.download({
+        url: txtUrl,
+        filename: `GoogleMeet-Recovered-Transcript-${suffix}-${timestamp}.txt`,
+        saveAs: false,
+      });
+
+      chrome.downloads.download({
+        url: vttUrl,
+        filename: `GoogleMeet-Recovered-Transcript-${suffix}-${timestamp}.vtt`,
+        saveAs: false,
+      });
     });
 
-    chrome.downloads.download({
-      url: vttUrl,
-      filename: `GoogleMeet-Recovered-Transcript-${suffix}-${timestamp}.vtt`,
-      saveAs: false,
-    });
+    // Cleanup session from IndexedDB after downloads initiate
+    setTimeout(async () => {
+      await recorderDB.deleteSession(sess.sessionId);
+    }, 10000);
 
-    // Cleanup session from IndexedDB
-    await recorderDB.deleteSession(sess.sessionId);
     if (recoveryCard) recoveryCard.style.display = 'none';
     pendingRecoverySession = null;
-    toast('Orphaned recording successfully recovered and downloaded.');
+    toast('Orphaned recording and transcript successfully recovered.');
   } catch (err) {
     console.error('[popup] Recovery failed:', err);
     alert(`Could not recover recording: ${err}`);
@@ -141,24 +300,28 @@ discardBtn?.addEventListener('click', async () => {
   }
 });
 
-// Init: sync recording state, check mic, and check for crashes
+// Init: sync recording state, check mic, settings, and check for crashes
 void (async () => {
   try {
     const st = await chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATUS' });
-    setUI(!!st?.recording);
+    setUI(!!st?.recording, st?.startedAt);
   } catch {
     setUI(false);
   }
   refreshMicButton().catch(() => {});
   checkOrphanedRecordings().catch(() => {});
+  initSettings().catch(() => {});
 })();
 
 // Listen for background state broadcasts
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === 'RECORDING_STATE') setUI(!!msg.recording);
+  if (msg?.type === 'RECORDING_STATE') setUI(!!msg.recording, msg.startedAt);
   if (msg?.type === 'RECORDING_SAVED') {
-    toast(`Saved: ${msg.filename || 'recording.webm'}`);
+    toast(`Video saved: ${msg.filename || 'recording.webm'}`);
     setUI(false);
+  }
+  if (msg?.type === 'TRANSCRIPT_SAVED') {
+    toast(`Transcript saved: ${msg.filename || 'transcript.txt'}`);
   }
 });
 
@@ -190,30 +353,6 @@ micBtn?.addEventListener('click', async () => {
     console.error('[popup] mic enable flow error', e);
     alert('Could not open the microphone setup page. Please try again.');
   }
-});
-
-// Manual transcript download (.txt)
-saveBtn?.addEventListener('click', async () => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) return;
-
-  const res = await chrome.tabs.sendMessage(tab.id, { type: 'GET_TRANSCRIPT' }).catch(() => undefined);
-  const transcript = (res as any)?.transcript as string | undefined;
-
-  if (!transcript?.trim()) {
-    toast('Transcript is empty');
-    alert('Transcript is currently empty. Make sure Captions are turned on in Google Meet.');
-    return;
-  }
-
-  const blob = new Blob([transcript], { type: 'text/plain' });
-  const url = URL.createObjectURL(blob);
-  const suffix = new URL(tab.url ?? 'https://meet.google.com').pathname.split('/').pop() || 'google-meet';
-
-  chrome.downloads.download(
-    { url, filename: `GoogleMeet-Transcript-${suffix}-${Date.now()}.txt`, saveAs: true },
-    () => URL.revokeObjectURL(url)
-  );
 });
 
 let inFlight = false;

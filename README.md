@@ -107,14 +107,20 @@ This compiles TypeScript via `ts-loader` and copies the HTML/manifest to `dist/`
 3. Click the extension icon (puzzle → pin it for quick access).
 
 4. In the popup:
- 
-  - **Download Transcript**: Turn closed captions on then hit Download Transcript after the meeting. This saves **google-meet-transcript-<meeting-id>-<timestamp>.txt**
-  - ** Recording **
-      - **Enable Microphone** - Turn on before you hit "Start Recording" to capture your audio in addition to the audio of the other participants
+  - **Recording**:
+      - **Enable Microphone** - Turn on before you hit "Start Recording" to capture your audio in addition to the audio of the other participants.
         - The mic prompt may not appear reliably in a popup. If so, the button opens a dedicated `Enable Microphone` page (`micsetup.html`) where you can click `Enable` and allow mic access.
-        - Once granted, the label changes to `Microphone Enabled`.
+        - Once granted, the label changes to `✓ Active`.
       - **Start Recording**: Starts a recording of the current tab (video + system audio). If mic is enabled and mixing is on (default), your mic is mixed in.
-      - **Stop & Download**: Finalizes and downloads `google-meet-recording-<meeting-id>-<timestamp>.webm.`
+      - **Stop & Save (Video + Transcript)**: Finalizes the session and **automatically downloads both**:
+        1. **Video recording**: `GoogleMeet-Recording-<meeting-id>-<timestamp>.webm`
+        2. **Meeting transcript**: `GoogleMeet-Transcript-<meeting-id>-<timestamp>.txt` (plus `.vtt` subtitles)
+  - **Configuration & Settings (⚙️ icon)**:
+      - Toggle which formats are auto-downloaded on stop (Video, `.txt` Transcript, `.vtt` Subtitles).
+      - Adjust recording quality: **1080p Full HD** (recommended), **720p HD** (compact), or **Native/4K**.
+      - Control microphone auto-mixing and hardware noise/echo suppression.
+      - Configure auto-stopping when leaving or disconnecting from a meeting.
+      - Manage local cache and stored sessions.
 
 > The extension shows a “REC” badge while recording. All files are saved locally via Chrome’s Downloads API.
 

@@ -4,116 +4,785 @@
     <meta charset="utf-8" />
     <title>Google Meet Recorder</title>
     <style>
+      :root {
+        --bg: #18191c;
+        --surface: #222428;
+        --surface-hover: #2d3036;
+        --surface-card: #272a2f;
+        --border: #363940;
+        --border-subtle: rgba(255, 255, 255, 0.07);
+        --text: #f2f3f5;
+        --text-secondary: #c4c7cc;
+        --text-muted: #8e949e;
+        --primary: #ea4335;
+        --primary-hover: #d93025;
+        --primary-glow: rgba(234, 67, 53, 0.25);
+        --green: #23a55a;
+        --green-bg: rgba(35, 165, 90, 0.15);
+        --blue: #3b82f6;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
       body {
-        width: 280px;
+        width: 336px;
         margin: 0;
         padding: 16px;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-        background: #202124;
-        color: #e8eaed;
+        background: var(--bg);
+        color: var(--text);
+        user-select: none;
+        overflow-x: hidden;
       }
-      h2 {
-        font-size: 15px;
-        margin: 0 0 12px;
-        font-weight: 600;
-        color: #ffffff;
+
+      /* Header */
+      .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 14px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+
+      .title-group {
         display: flex;
         align-items: center;
         gap: 8px;
       }
-      .rec-dot {
-        width: 8px;
-        height: 8px;
-        background: #ea4335;
-        border-radius: 50%;
-        display: inline-block;
-      }
-      button {
-        width: 100%;
-        padding: 9px 12px;
-        margin-bottom: 8px;
-        font-size: 13px;
-        font-weight: 500;
-        border-radius: 6px;
-        border: 1px solid #3c4043;
-        background: #303134;
-        color: #e8eaed;
-        cursor: pointer;
-        transition: background 0.15s, border-color 0.15s;
+
+      .logo-icon {
+        width: 24px;
+        height: 24px;
+        background: linear-gradient(135deg, #ea4335, #c5221f);
+        border-radius: 7px;
         display: flex;
         align-items: center;
         justify-content: center;
+        color: #fff;
+        font-size: 13px;
+        font-weight: 800;
+        box-shadow: 0 2px 8px var(--primary-glow);
+      }
+
+      h1 {
+        font-size: 14px;
+        font-weight: 600;
+        margin: 0;
+        color: #ffffff;
+        letter-spacing: -0.2px;
+      }
+
+      .header-actions {
+        display: flex;
+        align-items: center;
         gap: 6px;
       }
-      button:hover:not(:disabled) {
-        background: #3c4043;
-        border-color: #5f6368;
+
+      .status-pill {
+        font-size: 11px;
+        font-weight: 600;
+        padding: 3px 8px;
+        border-radius: 12px;
+        background: var(--surface);
+        color: var(--text-muted);
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        border: 1px solid var(--border-subtle);
+        transition: all 0.2s ease;
       }
-      button:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
+
+      .status-pill.recording {
+        background: rgba(234, 67, 53, 0.15);
+        color: #ff8577;
+        border-color: rgba(234, 67, 53, 0.4);
       }
-      button.primary {
-        background: #ea4335;
-        border-color: #ea4335;
-        color: #ffffff;
+
+      .beacon-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--text-muted);
       }
-      button.primary:hover:not(:disabled) {
-        background: #d93025;
-        border-color: #d93025;
+
+      .status-pill.recording .beacon-dot {
+        background: var(--primary);
+        box-shadow: 0 0 8px var(--primary);
+        animation: pulse 1.2s infinite ease-in-out;
       }
-      button.success {
-        border-color: #34a853;
-        color: #81c995;
+
+      @keyframes pulse {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.35; transform: scale(0.8); }
       }
-      hr {
-        border: none;
-        border-top: 1px solid #3c4043;
-        margin: 10px 0;
+
+      .icon-btn {
+        width: 26px;
+        height: 26px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 6px;
+        border: 1px solid var(--border-subtle);
+        background: var(--surface);
+        color: var(--text-muted);
+        cursor: pointer;
+        transition: all 0.15s ease;
+        padding: 0;
       }
+
+      .icon-btn:hover {
+        background: var(--surface-hover);
+        color: var(--text);
+        border-color: var(--border);
+      }
+
+      /* Views */
+      .view-container {
+        position: relative;
+      }
+
+      .view {
+        transition: opacity 0.2s ease, transform 0.2s ease;
+      }
+
+      .view.hidden {
+        display: none;
+      }
+
+      /* Recovery Card */
       #recovery-card {
         display: none;
-        background: rgba(234, 67, 53, 0.12);
-        border: 1px solid #ea4335;
-        border-radius: 6px;
-        padding: 10px;
+        background: rgba(234, 67, 53, 0.08);
+        border: 1px solid rgba(234, 67, 53, 0.35);
+        border-radius: 8px;
+        padding: 10px 12px;
         margin-bottom: 12px;
+        animation: slideDown 0.2s ease;
       }
+
+      @keyframes slideDown {
+        from { opacity: 0; transform: translateY(-4px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
       #recovery-card p {
         margin: 0 0 8px;
-        font-size: 12px;
+        font-size: 11px;
         line-height: 1.4;
-        color: #f28b82;
+        color: #ff9e94;
       }
+
       .card-actions {
         display: flex;
         gap: 6px;
       }
+
       .card-actions button {
-        margin-bottom: 0;
+        flex: 1;
+        padding: 6px;
         font-size: 11px;
+        font-weight: 600;
+        border-radius: 5px;
+        border: none;
+        cursor: pointer;
+        transition: all 0.15s;
+      }
+
+      #recover-btn {
+        background: var(--primary);
+        color: #ffffff;
+      }
+
+      #recover-btn:hover {
+        background: var(--primary-hover);
+      }
+
+      #discard-btn {
+        background: var(--surface);
+        color: var(--text-muted);
+      }
+
+      #discard-btn:hover {
+        background: var(--surface-hover);
+        color: var(--text);
+      }
+
+      /* Live Recording Timer Card */
+      .timer-card {
+        display: none;
+        background: linear-gradient(180deg, var(--surface-card) 0%, var(--surface) 100%);
+        border: 1px solid rgba(234, 67, 53, 0.3);
+        border-radius: 10px;
+        padding: 14px;
+        text-align: center;
+        margin-bottom: 14px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+      }
+
+      .timer-card.active {
+        display: block;
+      }
+
+      .timer-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        color: #ff8577;
+        margin-bottom: 4px;
+      }
+
+      .timer-digits {
+        font-family: 'SF Mono', Monaco, Consolas, monospace;
+        font-size: 32px;
+        font-weight: 700;
+        color: #ffffff;
+        letter-spacing: 1.5px;
+        margin: 2px 0 4px;
+        text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+      }
+
+      .start-time-info {
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+
+      .start-time-info strong {
+        color: var(--text-secondary);
+      }
+
+      /* Microphone Status Card */
+      .mic-card {
+        background: var(--surface);
+        border: 1px solid var(--border-subtle);
+        border-radius: 9px;
+        padding: 10px 12px;
+        margin-bottom: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        transition: border-color 0.15s;
+      }
+
+      .mic-card:hover {
+        border-color: var(--border);
+      }
+
+      .mic-info {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .mic-title {
+        font-size: 12px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        color: var(--text);
+      }
+
+      .mic-desc {
+        font-size: 10px;
+        color: var(--text-muted);
+      }
+
+      .btn-mic-enable {
+        padding: 5px 11px;
+        font-size: 11px;
+        font-weight: 600;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--surface-hover);
+        color: var(--text);
+        cursor: pointer;
+        transition: all 0.15s ease;
+        white-space: nowrap;
+      }
+
+      .btn-mic-enable:hover:not(.granted) {
+        background: #3e4249;
+        border-color: #555963;
+      }
+
+      .btn-mic-enable.granted {
+        background: var(--green-bg);
+        border-color: rgba(35, 165, 90, 0.4);
+        color: #81c995;
+        cursor: default;
+      }
+
+      /* Action Buttons */
+      .actions-container {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      button.main-btn {
+        width: 100%;
+        padding: 12px 16px;
+        font-size: 13px;
+        font-weight: 600;
+        border-radius: 9px;
+        border: none;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        transition: all 0.15s ease;
+      }
+
+      button.main-btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      button.btn-start {
+        background: linear-gradient(135deg, var(--primary) 0%, #d32f2f 100%);
+        color: #ffffff;
+        box-shadow: 0 2px 10px var(--primary-glow);
+      }
+
+      button.btn-start:hover:not(:disabled) {
+        background: linear-gradient(135deg, var(--primary-hover) 0%, #b71c1c 100%);
+        box-shadow: 0 4px 14px rgba(234, 67, 53, 0.4);
+        transform: translateY(-1px);
+      }
+
+      button.btn-start:active:not(:disabled) {
+        transform: translateY(0);
+      }
+
+      button.btn-stop {
+        background: #2e3035;
+        color: #ff8577;
+        border: 1px solid #4a4e57;
+      }
+
+      button.btn-stop:hover:not(:disabled) {
+        background: #3b3d44;
+        color: #ffffff;
+        border-color: #636772;
+      }
+
+      .auto-save-pill {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 5px;
+        font-size: 11px;
+        color: var(--text-muted);
+        margin-top: 10px;
+        padding: 5px;
+        background: rgba(255, 255, 255, 0.02);
+        border-radius: 6px;
+      }
+
+      .auto-save-pill span.check {
+        color: var(--green);
+        font-weight: 700;
+      }
+
+      .shortcut-hint {
+        text-align: center;
+        font-size: 11px;
+        color: var(--text-muted);
+        margin-top: 10px;
+      }
+
+      .shortcut-hint kbd {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 2px 6px;
+        font-size: 10px;
+        font-family: inherit;
+        color: #e8eaed;
+      }
+
+      /* Settings View */
+      .settings-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+
+      .btn-back {
+        width: 26px;
+        height: 26px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 6px;
+        border: 1px solid var(--border-subtle);
+        background: var(--surface);
+        color: var(--text-muted);
+        cursor: pointer;
+        padding: 0;
+        transition: all 0.15s;
+      }
+
+      .btn-back:hover {
+        background: var(--surface-hover);
+        color: var(--text);
+      }
+
+      .settings-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: #ffffff;
+      }
+
+      .settings-section {
+        background: var(--surface);
+        border: 1px solid var(--border-subtle);
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin-bottom: 10px;
+      }
+
+      .section-heading {
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--text-muted);
+        margin-bottom: 8px;
+      }
+
+      .toggle-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 7px 0;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+
+      .toggle-item:last-child {
+        border-bottom: none;
+        padding-bottom: 0;
+      }
+
+      .toggle-item:first-child {
+        padding-top: 0;
+      }
+
+      .toggle-label {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding-right: 10px;
+      }
+
+      .toggle-title {
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--text);
+      }
+
+      .toggle-desc {
+        font-size: 10px;
+        color: var(--text-muted);
+      }
+
+      /* Modern iOS-style toggle switch */
+      .switch {
+        position: relative;
+        display: inline-block;
+        width: 34px;
+        height: 20px;
+        flex-shrink: 0;
+      }
+
+      .switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background-color: #3b3d44;
+        transition: 0.2s ease;
+        border-radius: 20px;
+      }
+
+      .slider:before {
+        position: absolute;
+        content: "";
+        height: 14px;
+        width: 14px;
+        left: 3px;
+        bottom: 3px;
+        background-color: white;
+        transition: 0.2s ease;
+        border-radius: 50%;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+      }
+
+      input:checked + .slider {
+        background-color: var(--primary);
+      }
+
+      input:checked + .slider:before {
+        transform: translateX(14px);
+      }
+
+      /* Quality select */
+      .select-quality {
+        width: 100%;
+        background: var(--surface-hover);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--text);
         padding: 6px 8px;
+        font-size: 12px;
+        outline: none;
+        margin-top: 4px;
+      }
+
+      .select-quality:focus {
+        border-color: var(--primary);
+      }
+
+      /* Clear cache button */
+      .btn-clear-cache {
+        width: 100%;
+        padding: 7px;
+        font-size: 11px;
+        font-weight: 500;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--text-muted);
+        cursor: pointer;
+        transition: all 0.15s;
+        margin-top: 4px;
+      }
+
+      .btn-clear-cache:hover {
+        background: rgba(234, 67, 53, 0.1);
+        border-color: rgba(234, 67, 53, 0.4);
+        color: #ff8577;
+      }
+
+      .settings-footer {
+        text-align: center;
+        font-size: 10px;
+        color: var(--text-muted);
+        margin-top: 10px;
       }
     </style>
   </head>
   <body>
-    <h2><span class="rec-dot"></span> Google Meet Recorder</h2>
-
-    <!-- Crash / Tab-close recovery card -->
-    <div id="recovery-card">
-      <p id="recovery-msg">Unfinished recording detected from previous session.</p>
-      <div class="card-actions">
-        <button id="recover-btn" class="primary">Recover & Download</button>
-        <button id="discard-btn">Discard</button>
+    <!-- Header -->
+    <div class="header">
+      <div class="title-group">
+        <div class="logo-icon">M</div>
+        <h1>Meet Recorder</h1>
+      </div>
+      <div class="header-actions">
+        <div id="status-pill" class="status-pill">
+          <span class="beacon-dot"></span>
+          <span id="status-text">Idle</span>
+        </div>
+        <button id="btn-settings-toggle" class="icon-btn" title="Configure extension">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        </button>
       </div>
     </div>
 
-    <button id="save">Download Transcript (.txt)</button>
-    <hr />
-    <button id="enable-mic">Enable Microphone</button>
-    <hr />
-    <button id="start-rec" class="primary">Start Recording (Tab)</button>
-    <button id="stop-rec" disabled>Stop & Download</button>
+    <!-- Views Container -->
+    <div class="view-container">
+      <!-- 1. MAIN RECORDING VIEW -->
+      <div id="view-main" class="view">
+        <!-- Crash / Orphaned recording recovery card -->
+        <div id="recovery-card">
+          <p id="recovery-msg">Unfinished recording detected from previous session.</p>
+          <div class="card-actions">
+            <button id="recover-btn">Recover & Save</button>
+            <button id="discard-btn">Discard</button>
+          </div>
+        </div>
+
+        <!-- Live Recording Timer Card -->
+        <div id="timer-card" class="timer-card">
+          <div class="timer-badge">
+            <span class="beacon-dot" style="background:#ea4335;"></span>
+            Recording in progress
+          </div>
+          <div id="timer-digits" class="timer-digits">00:00</div>
+          <div id="start-time-info" class="start-time-info">Started at: <strong>--:--</strong></div>
+        </div>
+
+        <!-- Microphone Permission & Status Card -->
+        <div class="mic-card">
+          <div class="mic-info">
+            <div class="mic-title">🎙️ Your Voice (Mic)</div>
+            <div id="mic-desc" class="mic-desc">Mixes your voice into the recording</div>
+          </div>
+          <button id="enable-mic" class="btn-mic-enable">Enable</button>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="actions-container">
+          <button id="start-rec" class="main-btn btn-start">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="12" cy="12" r="10" />
+            </svg>
+            Start Recording (Tab)
+          </button>
+
+          <button id="stop-rec" class="main-btn btn-stop" disabled style="display: none;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="5" y="5" width="14" height="14" rx="2" />
+            </svg>
+            Stop & Save (Video + Transcript)
+          </button>
+        </div>
+
+        <!-- Automatic dual-save reassurance -->
+        <div class="auto-save-pill">
+          <span class="check">✓</span>
+          <span>Automatically saves video &amp; transcript on stop</span>
+        </div>
+
+        <div class="shortcut-hint">
+          Shortcut: <kbd>Alt</kbd> + <kbd>R</kbd> to toggle
+        </div>
+      </div>
+
+      <!-- 2. SETTINGS / CONFIGURATION VIEW -->
+      <div id="view-settings" class="view hidden">
+        <div class="settings-header">
+          <button id="btn-settings-back" class="btn-back" title="Back to recorder">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
+          </button>
+          <div class="settings-title">Configuration &amp; Preferences</div>
+        </div>
+
+        <!-- Section: Automatic Downloads -->
+        <div class="settings-section">
+          <div class="section-heading">Automatic Downloads On Stop</div>
+          
+          <div class="toggle-item">
+            <div class="toggle-label">
+              <span class="toggle-title">Video Recording</span>
+              <span class="toggle-desc">Download captured video (.webm)</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="setting-save-video" checked />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="toggle-item">
+            <div class="toggle-label">
+              <span class="toggle-title">Meeting Transcript</span>
+              <span class="toggle-desc">Timestamped text notes (.txt)</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="setting-save-txt" checked />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="toggle-item">
+            <div class="toggle-label">
+              <span class="toggle-title">Subtitle Track</span>
+              <span class="toggle-desc">WebVTT captions for players (.vtt)</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="setting-save-vtt" checked />
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Section: Recording Quality -->
+        <div class="settings-section">
+          <div class="section-heading">Recording Quality</div>
+          <div class="toggle-desc" style="margin-bottom: 4px;">Capture resolution and framerate:</div>
+          <select id="setting-video-quality" class="select-quality">
+            <option value="1080p">1080p Full HD (30 FPS) - Recommended</option>
+            <option value="720p">720p HD (30 FPS) - Compact file size</option>
+            <option value="max">Native / Up to 4K (60 FPS)</option>
+          </select>
+        </div>
+
+        <!-- Section: Audio & Mic -->
+        <div class="settings-section">
+          <div class="section-heading">Audio &amp; Voice</div>
+
+          <div class="toggle-item">
+            <div class="toggle-label">
+              <span class="toggle-title">Auto-Mix Microphone</span>
+              <span class="toggle-desc">Include your voice if mic enabled</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="setting-auto-mic" checked />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="toggle-item">
+            <div class="toggle-label">
+              <span class="toggle-title">Echo &amp; Noise Cancellation</span>
+              <span class="toggle-desc">Filter background noise in mic audio</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="setting-noise-suppression" checked />
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Section: Smart Automation -->
+        <div class="settings-section">
+          <div class="section-heading">Smart Automation</div>
+
+          <div class="toggle-item">
+            <div class="toggle-label">
+              <span class="toggle-title">Auto-Stop on Exit</span>
+              <span class="toggle-desc">Save automatically when leaving call</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="setting-auto-stop" checked />
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Section: Storage Management -->
+        <div class="settings-section">
+          <div class="section-heading">Storage &amp; Recovery</div>
+          <button id="btn-clear-cache" class="btn-clear-cache">🗑️ Clear Cached Sessions</button>
+        </div>
+
+        <div class="settings-footer">
+          Google Meet Recorder • 100% Local &amp; Private
+        </div>
+      </div>
+    </div>
 
     <script src="popup.js"></script>
   </body>

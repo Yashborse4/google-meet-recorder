@@ -6,6 +6,8 @@
 // - Google Meet state forwarding (Mute Sync, Captions, Disconnect)
 // - Auto-finalization when recorded tab closes
 
+import { getSettings } from './settings';
+
 let offscreenPort: chrome.runtime.Port | null = null;
 let offscreenReady = false;
 let lastKnownRecording = false;
@@ -102,7 +104,7 @@ async function ensureOffscreen(): Promise<void> {
     bglog('Creating offscreen document…');
     await chrome.offscreen.createDocument({
       url: chrome.runtime.getURL('offscreen.html'),
-      reasons: ['BLOBS', 'AUDIO_PLAYBACK', 'USER_MEDIA'],
+      reasons: ['BLOBS', 'AUDIO_PLAYBACK', 'USER_MEDIA', 'DISPLAY_MEDIA'],
       justification: 'Record tab audio+video in offscreen using MediaRecorder and Web Audio API',
     });
   }
@@ -156,60 +158,111 @@ chrome.runtime.onConnect.addListener((port) => {
       broadcastState(lastKnownRecording, msg);
     }
 
-    // Dual file downloads (Video WebM + WebVTT subtitles)
+    // Multi-file downloads (Video WebM/MP4 + Plain Text .txt transcript + WebVTT subtitles)
     if (msg?.type === 'OFFSCREEN_SAVE') {
       const sanitize = (name: string) => name.replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
       const videoFilename = sanitize(msg.videoFilename || `GoogleMeet-Recording-${Date.now()}.webm`);
+      const txtFilename = sanitize(msg.txtFilename || `GoogleMeet-Transcript-${Date.now()}.txt`);
       const vttFilename = sanitize(msg.vttFilename || `GoogleMeet-Transcript-${Date.now()}.vtt`);
 
-      bglog('OFFSCREEN_SAVE received:', videoFilename);
+      bglog('OFFSCREEN_SAVE received: video =', videoFilename, ', transcript =', txtFilename);
 
-      if (msg.videoBlobUrl) {
-        chrome.downloads.download(
-          {
-            url: msg.videoBlobUrl,
-            filename: videoFilename,
-            saveAs: true,
-          },
-          (downloadId) => {
-            if (chrome.runtime.lastError) {
-              bglog('Video download error:', chrome.runtime.lastError.message);
-            } else {
-              bglog(`Video download initiated, id=${downloadId}`);
-              chrome.runtime.sendMessage({ type: 'RECORDING_SAVED', filename: videoFilename }).catch(() => {});
-            }
+      void (async () => {
+        const settings = await getSettings();
+
+        const downloadTranscripts = () => {
+          // 1. Download readable plain-text transcript (.txt)
+          const txtUrl = msg.txtDataUrl || msg.txtBlobUrl;
+          if (txtUrl && settings.saveTxtTranscript) {
+            chrome.downloads.download(
+              {
+                url: txtUrl,
+                filename: txtFilename,
+                saveAs: false,
+              },
+              (txtId) => {
+                if (chrome.runtime.lastError) {
+                  bglog('TXT transcript download error:', chrome.runtime.lastError.message);
+                } else {
+                  bglog(`TXT transcript download initiated, id=${txtId}`);
+                  chrome.runtime.sendMessage({ type: 'TRANSCRIPT_SAVED', filename: txtFilename }).catch(() => {});
+                }
+              }
+            );
           }
-        );
-      }
 
-      if (msg.vttBlobUrl) {
-        chrome.downloads.download(
-          {
-            url: msg.vttBlobUrl,
-            filename: vttFilename,
-            saveAs: false,
-          },
-          (vttDownloadId) => {
-            if (chrome.runtime.lastError) {
-              bglog('VTT download error:', chrome.runtime.lastError.message);
-            } else {
-              bglog(`VTT download initiated, id=${vttDownloadId}`);
-            }
+          // 2. Download WebVTT subtitle track (.vtt)
+          const vttUrl = msg.vttDataUrl || msg.vttBlobUrl;
+          if (vttUrl && settings.saveVttSubtitles) {
+            chrome.downloads.download(
+              {
+                url: vttUrl,
+                filename: vttFilename,
+                saveAs: false,
+              },
+              (vttId) => {
+                if (chrome.runtime.lastError) {
+                  bglog('VTT subtitle download error:', chrome.runtime.lastError.message);
+                } else {
+                  bglog(`VTT subtitle download initiated, id=${vttId}`);
+                }
+              }
+            );
           }
-        );
-      }
+        };
 
-      // Allow download to initiate before signaling URL revocation and DB cleanup
-      setTimeout(() => {
-        try {
-          offscreenPort?.postMessage({
-            type: 'REVOKE_BLOB_URL',
-            sessionId: msg.sessionId,
-            videoBlobUrl: msg.videoBlobUrl,
-            vttBlobUrl: msg.vttBlobUrl,
-          });
-        } catch {}
-      }, 15000);
+        let activeDownloadId: number | null = null;
+        const cleanupSession = () => {
+          try {
+            offscreenPort?.postMessage({
+              type: 'REVOKE_BLOB_URL',
+              sessionId: msg.sessionId,
+              videoBlobUrl: msg.videoBlobUrl,
+              txtBlobUrl: msg.txtBlobUrl,
+              vttBlobUrl: msg.vttBlobUrl,
+            });
+          } catch {}
+        };
+
+        if (msg.videoBlobUrl && settings.saveVideo) {
+          chrome.downloads.download(
+            {
+              url: msg.videoBlobUrl,
+              filename: videoFilename,
+              saveAs: true,
+            },
+            (downloadId) => {
+              if (chrome.runtime.lastError) {
+                bglog('Video download error or cancelled:', chrome.runtime.lastError.message);
+              } else {
+                activeDownloadId = downloadId ?? null;
+                bglog(`Video download initiated, id=${downloadId}`);
+                chrome.runtime.sendMessage({ type: 'RECORDING_SAVED', filename: videoFilename }).catch(() => {});
+              }
+              // Automatically download transcript when saving video
+              downloadTranscripts();
+            }
+          );
+        } else {
+          downloadTranscripts();
+        }
+
+        // Track completion for safe memory cleanup
+        if (chrome.downloads?.onChanged) {
+          const downloadListener = (delta: chrome.downloads.DownloadDelta) => {
+            if (activeDownloadId && delta.id === activeDownloadId) {
+              if (delta.state && (delta.state.current === 'complete' || delta.state.current === 'interrupted')) {
+                setTimeout(cleanupSession, 10000);
+                chrome.downloads.onChanged.removeListener(downloadListener);
+              }
+            }
+          };
+          chrome.downloads.onChanged.addListener(downloadListener);
+        }
+
+        // Fallback cleanup timer (5 minutes)
+        setTimeout(cleanupSession, 300000);
+      })();
     }
   });
 
@@ -246,25 +299,27 @@ function postToOffscreen(msg: any): Promise<any> {
   });
 }
 
-async function getStreamIdForTab(tabId: number): Promise<{ streamId: string, source: 'tab' | 'desktop' }> {
-  // 1. Try direct tabCapture.getMediaStreamId (succeeds when initiated via extension gesture like popup or command)
-  try {
-    const directId = await new Promise<string>((resolve, reject) => {
-      chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, (id?: string) => {
-        const err = chrome.runtime.lastError;
-        if (err || !id) {
-          return reject(err ? new Error(err.message) : new Error('Empty streamId'));
-        }
-        resolve(id);
+async function getStreamIdForTab(tabId: number, preferDesktop: boolean = false): Promise<{ streamId: string, source: 'tab' | 'desktop' }> {
+  // 1. Try direct tabCapture.getMediaStreamId (ONLY valid when initiated via extension gesture like popup or command)
+  if (!preferDesktop) {
+    try {
+      const directId = await new Promise<string>((resolve, reject) => {
+        chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, (id?: string) => {
+          const err = chrome.runtime.lastError;
+          if (err || !id) {
+            return reject(err ? new Error(err.message) : new Error('Empty streamId'));
+          }
+          resolve(id);
+        });
       });
-    });
-    return { streamId: directId, source: 'tab' };
-  } catch (err: any) {
-    bglog('tabCapture.getMediaStreamId not invoked via extension gesture; falling back to desktopCapture:', err?.message || err);
+      return { streamId: directId, source: 'tab' };
+    } catch (err: any) {
+      bglog('tabCapture.getMediaStreamId not invoked via extension gesture; falling back to desktopCapture:', err?.message || err);
+    }
   }
 
-  // 2. Fallback: desktopCapture.chooseDesktopMedia(['tab', 'audio'])
-  // Works when initiated from in-page buttons without activeTab restrictions!
+  // 2. Fallback / in-page button initiator: desktopCapture.chooseDesktopMedia(['tab', 'audio'])
+  // Works cleanly when initiated from in-page buttons without activeTab restrictions!
   const tab = await chrome.tabs.get(tabId);
   return new Promise<{ streamId: string, source: 'tab' | 'desktop' }>((resolve, reject) => {
     try {
@@ -286,6 +341,12 @@ chrome.commands?.onCommand.addListener(async (command) => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id || !tab.url?.includes('meet.google.com')) return;
     if (lastKnownRecording) {
+      if (tab?.id) {
+        try {
+          await chrome.tabs.sendMessage(tab.id, { type: 'FLUSH_CAPTIONS' });
+          await wait(150);
+        } catch {}
+      }
       if (offscreenPort) await postToOffscreen({ type: 'OFFSCREEN_STOP' });
     } else {
       try {
@@ -294,6 +355,8 @@ chrome.commands?.onCommand.addListener(async (command) => {
         const r = await postToOffscreen({ type: 'OFFSCREEN_START', streamId: captureInfo.streamId, source: captureInfo.source, meetingId: 'google-meet' });
         if (r?.ok) {
           activeRecordingTabId = tab.id;
+          activeRecordingStartTime = Date.now();
+          activeRecordingSessionId = r.sessionId;
           broadcastState(true);
         }
       } catch (err) {
@@ -323,7 +386,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       try {
-        const captureInfo = await getStreamIdForTab(targetTabId);
+        const isFromInPage = typeof sender.tab?.id === 'number';
+        const captureInfo = await getStreamIdForTab(targetTabId, isFromInPage);
         let meetingId = 'google-meet';
         try {
           const tab = await chrome.tabs.get(targetTabId);
@@ -352,8 +416,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     // 2. Stop Recording (from popup, injected Meet button, or auto-disconnect)
     if (msg?.type === 'STOP_RECORDING' || msg?.type === 'FINALIZE_RECORDING') {
-      bglog('STOP_RECORDING requested');
+      bglog('STOP_RECORDING / FINALIZE requested:', msg.type);
       try {
+        if (msg.type === 'FINALIZE_RECORDING') {
+          const settings = await getSettings();
+          if (!settings.autoStopOnExit) {
+            bglog('FINALIZE_RECORDING ignored as autoStopOnExit is false in settings');
+            sendResponse({ ok: true });
+            return;
+          }
+        }
+
+        if (activeRecordingTabId) {
+          try {
+            await chrome.tabs.sendMessage(activeRecordingTabId, { type: 'FLUSH_CAPTIONS' });
+            await wait(150);
+          } catch {}
+        }
         if (offscreenPort && lastKnownRecording) {
           const r = await postToOffscreen({ type: 'OFFSCREEN_STOP' });
           bglog('OFFSCREEN_STOP response', r);
@@ -404,6 +483,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // Auto-finalize recording if user closes the active recorded Meet tab
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   if (tabId === activeRecordingTabId && lastKnownRecording) {
+    const settings = await getSettings();
+    if (!settings.autoStopOnExit) {
+      bglog(`Recorded tab ${tabId} was closed, but autoStopOnExit is disabled in settings.`);
+      return;
+    }
     bglog(`Recorded tab ${tabId} was closed. Auto-stopping recording...`);
     try {
       if (offscreenPort) {

@@ -143,6 +143,7 @@ function createFloatingBadge() {
 
   floatingBadge.addEventListener('click', () => {
     if (isRecording) {
+      flushPendingCaptions();
       chrome.runtime.sendMessage({ type: 'STOP_RECORDING' }).catch(() => {});
     }
   });
@@ -150,10 +151,8 @@ function createFloatingBadge() {
   document.body.appendChild(floatingBadge);
 }
 
-// --- 2. Google Meet Control Bar Button Injection ---
-let controlBarButton: HTMLButtonElement | null = null;
-
-function updateButtonUI(recording: boolean) {
+// --- 2. Google Meet Recording State & WakeLock Management ---
+function updateRecordingUI(recording: boolean) {
   isRecording = recording;
 
   if (recording) {
@@ -173,10 +172,6 @@ function updateButtonUI(recording: boolean) {
         const elapsed = Date.now() - recordingStartTime;
         const formatted = formatDuration(elapsed);
         if (floatingTimerEl) floatingTimerEl.textContent = formatted;
-        if (controlBarButton) {
-          const timerLabel = controlBarButton.querySelector('.rec-btn-timer');
-          if (timerLabel) timerLabel.textContent = formatted;
-        }
       }, 1000);
     }
   } else {
@@ -186,226 +181,6 @@ function updateButtonUI(recording: boolean) {
     }
     recordingStartTime = 0;
   }
-
-  if (controlBarButton) {
-    controlBarButton.setAttribute('aria-pressed', recording ? 'true' : 'false');
-    controlBarButton.title = recording ? 'Stop & Save Recording' : 'Start Recording';
-
-    const iconContainer = controlBarButton.querySelector('.rec-icon-wrapper') as HTMLElement | null;
-    const timerLabel = controlBarButton.querySelector('.rec-btn-timer') as HTMLElement | null;
-
-    if (recording) {
-      controlBarButton.style.backgroundColor = 'rgba(234, 67, 53, 0.95)';
-      controlBarButton.style.color = '#ffffff';
-      controlBarButton.style.borderRadius = '20px';
-      controlBarButton.style.padding = '0 12px';
-      controlBarButton.style.width = 'auto';
-      if (iconContainer) {
-        iconContainer.innerHTML = `
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="#ffffff">
-            <rect x="6" y="6" width="12" height="12" rx="2" />
-          </svg>
-        `;
-      }
-      if (timerLabel) timerLabel.style.display = 'inline';
-    } else {
-      controlBarButton.style.backgroundColor = 'rgba(32, 33, 36, 0.85)';
-      controlBarButton.style.color = '#e8eaed';
-      controlBarButton.style.borderRadius = '50%';
-      controlBarButton.style.border = '2px solid rgba(234, 67, 53, 0.7)';
-      controlBarButton.style.padding = '0';
-      controlBarButton.style.width = '40px';
-      if (iconContainer) {
-        iconContainer.innerHTML = `
-          <svg width="20" height="20" viewBox="0 0 24 24">
-            <circle cx="12" cy="12" r="5.5" fill="#ea4335" />
-            <circle cx="12" cy="12" r="8.5" fill="none" stroke="#e8eaed" stroke-width="1.8" />
-          </svg>
-        `;
-      }
-      if (timerLabel) {
-        timerLabel.style.display = 'none';
-        timerLabel.textContent = '00:00';
-      }
-    }
-  }
-}
-
-function createControlBarButton(): HTMLButtonElement {
-  const btn = document.createElement('button');
-  btn.id = 'gmeet-rec-control-btn';
-  btn.type = 'button';
-  btn.title = 'Start Recording (Alt+R)';
-  btn.setAttribute('aria-label', 'Toggle meeting recording');
-  btn.className = 'gmeet-rec-btn-hover';
-
-  btn.style.cssText = `
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    height: 40px;
-    width: 40px;
-    min-width: 40px;
-    padding: 0;
-    margin: 0 4px;
-    border-radius: 50%;
-    border: 2px solid rgba(234, 67, 53, 0.7);
-    background-color: rgba(32, 33, 36, 0.85);
-    color: #e8eaed;
-    font-family: 'Google Sans', Roboto, Arial, sans-serif;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    outline: none;
-    transition: all 0.2s ease;
-    z-index: 100;
-    flex-shrink: 0;
-  `;
-
-  const iconWrapper = document.createElement('span');
-  iconWrapper.className = 'rec-icon-wrapper';
-  iconWrapper.style.display = 'inline-flex';
-  iconWrapper.style.alignItems = 'center';
-  iconWrapper.innerHTML = `
-    <svg width="20" height="20" viewBox="0 0 24 24">
-      <circle cx="12" cy="12" r="5.5" fill="#ea4335" />
-      <circle cx="12" cy="12" r="8.5" fill="none" stroke="#e8eaed" stroke-width="1.8" />
-    </svg>
-  `;
-
-  const timerSpan = document.createElement('span');
-  timerSpan.className = 'rec-btn-timer';
-  timerSpan.style.display = 'none';
-  timerSpan.textContent = '00:00';
-
-  btn.appendChild(iconWrapper);
-  btn.appendChild(timerSpan);
-
-  btn.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    if (isRecording) {
-      btn.disabled = true;
-      timerSpan.textContent = 'Saving...';
-      try {
-        await chrome.runtime.sendMessage({ type: 'STOP_RECORDING' });
-      } catch (err) {
-        console.error('[MeetContentScript] STOP_RECORDING failed:', err);
-      } finally {
-        btn.disabled = false;
-      }
-    } else {
-      btn.disabled = true;
-      try {
-        const resp = await chrome.runtime.sendMessage({ type: 'START_RECORDING' });
-        if (!resp?.ok) {
-          if (!resp?.error?.toLowerCase().includes('cancel')) {
-            alert(`Could not start recording:\n${resp?.error || 'Unknown error'}`);
-          }
-        }
-      } catch (err: any) {
-        if (!err?.message?.toLowerCase().includes('cancel')) {
-          console.error('[MeetContentScript] START_RECORDING failed:', err);
-          alert(`Could not start recording: ${err?.message || err}`);
-        }
-      } finally {
-        btn.disabled = false;
-      }
-    }
-  });
-
-  return btn;
-}
-
-/**
- * Locate the native Google Meet CC (Closed Captions) button.
- */
-function findCCButton(): HTMLElement | null {
-  const selectors = [
-    'button[aria-label*="caption" i]',
-    'button[aria-label*="subtítulo" i]',
-    'button[aria-label*="subtitle" i]',
-    'button[data-tooltip*="caption" i]',
-    'button[aria-label*="closed caption" i]',
-  ];
-
-  for (const sel of selectors) {
-    const el = document.querySelector<HTMLElement>(sel);
-    if (el && el.id !== 'gmeet-rec-control-btn') return el;
-  }
-
-  const allButtons = document.querySelectorAll<HTMLButtonElement>('button');
-  for (const btn of allButtons) {
-    if (btn.id === 'gmeet-rec-control-btn') continue;
-    const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-    const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
-    if (label.includes('caption') || tooltip.includes('caption') || label.includes('subtítulo')) {
-      return btn;
-    }
-  }
-
-  return null;
-}
-
-/**
- * Injects the Record button directly beside Google Meet's CC (Closed Captions) button.
- * Uses a hard cooldown to prevent re-injection during Meet's SPA re-render bursts.
- */
-let _overlayContainer: HTMLDivElement | null = null;
-
-function injectControlBarButton() {
-  const targetAnchor = findCCButton() ||
-    document.querySelector<HTMLElement>('button[aria-label*="raise hand" i]') ||
-    document.querySelector<HTMLElement>('button[aria-label*="reaction" i]') ||
-    document.querySelector<HTMLElement>('button[data-is-muted]') ||
-    document.querySelector<HTMLElement>('button[aria-label*="microphone" i]');
-
-  // Initialize the floating overlay once
-  if (!_overlayContainer) {
-    _overlayContainer = document.createElement('div');
-    _overlayContainer.id = 'gmeet-rec-overlay';
-    _overlayContainer.style.cssText = `
-      position: fixed;
-      z-index: 999999;
-      display: flex;
-      align-items: center;
-      pointer-events: auto;
-      transition: opacity 0.2s;
-    `;
-    
-    controlBarButton = createControlBarButton();
-    _overlayContainer.appendChild(controlBarButton);
-    document.body.appendChild(_overlayContainer);
-    updateButtonUI(isRecording);
-    console.log('[MeetContentScript] Floating record overlay initialized.');
-  }
-
-  // If we can't find an anchor (control bar hidden), hide the overlay
-  if (!targetAnchor || !targetAnchor.isConnected) {
-    _overlayContainer.style.opacity = '0';
-    _overlayContainer.style.pointerEvents = 'none';
-    return;
-  }
-
-  // Track the anchor's position
-  const rect = targetAnchor.getBoundingClientRect();
-  
-  // Only show if the anchor is actually visible on screen (width > 0)
-  if (rect.width === 0 || rect.height === 0 || rect.bottom < 0) {
-    _overlayContainer.style.opacity = '0';
-    _overlayContainer.style.pointerEvents = 'none';
-    return;
-  }
-
-  // Position our overlay directly to the right of the target anchor
-  // Adding 8px of padding/margin gap
-  const top = rect.top + (rect.height / 2) - 20; // 20 is half of our 40px button height
-  const left = rect.right + 8;
-
-  _overlayContainer.style.top = `${top}px`;
-  _overlayContainer.style.left = `${left}px`;
-  _overlayContainer.style.opacity = '1';
-  _overlayContainer.style.pointerEvents = 'auto';
 }
 
 // --- 3. Google Meet Mute Sync Observer ("Hot Mic" Privacy Protection) ---
@@ -500,6 +275,10 @@ function commit(key: string) {
 
   clearTimeout(entry.timer);
   prior.delete(key);
+}
+
+function flushPendingCaptions() {
+  [...prior.keys()].forEach(commit);
 }
 
 // Multi-Tier Selectors
@@ -606,8 +385,9 @@ function checkForMeetingExit() {
   for (const phrase of exitPhrases) {
     if (textContent.includes(phrase)) {
       console.log(`[MeetContentScript] Detected exit phrase: "${phrase}". Auto-finalizing recording...`);
+      flushPendingCaptions();
       chrome.runtime.sendMessage({ type: 'FINALIZE_RECORDING' }).catch(() => {});
-      updateButtonUI(false);
+      updateRecordingUI(false);
       break;
     }
   }
@@ -616,6 +396,7 @@ function checkForMeetingExit() {
 // Tab navigation / unload listener
 window.addEventListener('beforeunload', () => {
   if (isRecording) {
+    flushPendingCaptions();
     chrome.runtime.sendMessage({ type: 'FINALIZE_RECORDING' }).catch(() => {});
   }
 });
@@ -629,24 +410,17 @@ window.addEventListener('online', () => {
 });
 
 // --- Master DOM Observer ---
-// NOTE: Button injection is intentionally NOT in this observer.
-// It is managed by a setInterval in init() to avoid MutationObserver feedback loops
-// caused by Meet's SPA re-rendering the control bar.
 let _throttleMute: number | null = null;
 let _throttleExit: number | null = null;
 
 const rootObserver = new MutationObserver((mutations) => {
-  // Skip mutations caused by our own injected elements — prevents false-positive triggers
+  // Skip mutations caused by our own injected elements
   const allOurs = mutations.every((m) => {
     const target = m.target as Node;
     return (
       target === floatingBadge ||
       floatingBadge?.contains(target) ||
-      target === controlBarButton ||
-      controlBarButton?.contains(target) ||
-      Array.from(m.addedNodes).every(
-        (n) => n === floatingBadge || n === controlBarButton
-      )
+      Array.from(m.addedNodes).every((n) => n === floatingBadge)
     );
   });
   if (allOurs) return;
@@ -688,19 +462,13 @@ const rootObserver = new MutationObserver((mutations) => {
 function init() {
   createFloatingBadge();
 
-  // Initialize immediately, then track position rapidly.
-  // Using a fast interval because it only updates CSS top/left,
-  // which keeps the overlay tightly synced if the window resizes or the bar animates.
-  injectControlBarButton();
-  window.setInterval(injectControlBarButton, 250);
-
   rootObserver.observe(document.body, { childList: true, subtree: true });
 
   // Query background for active recording state
   chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATUS' }, (res) => {
     if (res?.recording) {
       if (res.startedAt) recordingStartTime = res.startedAt;
-      updateButtonUI(true);
+      updateRecordingUI(true);
     }
   });
 
@@ -717,14 +485,14 @@ if (document.readyState === 'loading') {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'RECORDING_STATE') {
     if (msg.startedAt) recordingStartTime = msg.startedAt;
-    updateButtonUI(!!msg.recording);
+    updateRecordingUI(!!msg.recording);
     sendResponse({ ok: true });
     return true;
   }
 
-  if (msg?.type === 'GET_TRANSCRIPT') {
-    [...prior.keys()].forEach(commit);
-    sendResponse({ transcript: transcriptBuffer.join('\n') });
+  if (msg?.type === 'GET_TRANSCRIPT' || msg?.type === 'FLUSH_CAPTIONS') {
+    flushPendingCaptions();
+    sendResponse({ ok: true, transcript: transcriptBuffer.join('\n') });
     return true;
   }
 

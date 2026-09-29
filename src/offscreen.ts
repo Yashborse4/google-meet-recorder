@@ -9,6 +9,7 @@
 
 import { recorderDB } from './db';
 import { fixWebmDuration } from './webmFix';
+import { getSettings } from './settings';
 
 const WANT_MIC_MIX = true;
 
@@ -83,12 +84,15 @@ let currentMixedStream: MediaStream | null = null;
 // Microphone capture
 async function maybeGetMicStream(): Promise<MediaStream | null> {
   if (!WANT_MIC_MIX) return null;
+  const settings = await getSettings();
+  if (!settings.autoMixMic) return null;
+
   try {
     const mic = await navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
+        echoCancellation: settings.noiseSuppression,
+        noiseSuppression: settings.noiseSuppression,
+        autoGainControl: settings.noiseSuppression,
       },
     });
     const t = mic.getAudioTracks()[0];
@@ -172,35 +176,61 @@ async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream |
   return new MediaStream([...videoTracks, ...mixedDest.stream.getAudioTracks()]);
 }
 
-function makeConstraints(streamId: string, source: 'tab' | 'desktop'): MediaStreamConstraints {
+function makeConstraints(streamId: string, source: 'tab' | 'desktop', quality: '1080p' | '720p' | 'max' = '1080p'): MediaStreamConstraints {
   const mandatory = { chromeMediaSource: source, chromeMediaSourceId: streamId } as any;
+  let maxWidth = 1920;
+  let maxHeight = 1080;
+  let maxFrameRate = 30;
+
+  if (quality === '720p') {
+    maxWidth = 1280;
+    maxHeight = 720;
+    maxFrameRate = 30;
+  } else if (quality === 'max') {
+    maxWidth = 3840;
+    maxHeight = 2160;
+    maxFrameRate = 60;
+  }
+
   return {
-    audio: source === 'tab' ? {
+    audio: {
       mandatory,
-      optional: [{ googDisableLocalEcho: false }],
-    } as any : {
-      mandatory,
+      optional: source === 'tab' ? [{ googDisableLocalEcho: false }] : [],
     } as any,
     video: {
       mandatory: {
         ...mandatory,
-        maxWidth: 1920,
-        maxHeight: 1080,
-        maxFrameRate: 30,
+        maxWidth,
+        maxHeight,
+        maxFrameRate,
       },
     } as any,
   };
 }
 
 async function captureWithStreamId(streamId: string, source: 'tab' | 'desktop'): Promise<MediaStream> {
-  log(`Capturing getUserMedia with streamId=${streamId} source=${source}`);
-  return await navigator.mediaDevices.getUserMedia(makeConstraints(streamId, source));
+  const settings = await getSettings();
+  log(`Capturing getUserMedia with streamId=${streamId} source=${source} quality=${settings.videoQuality}`);
+  try {
+    return await navigator.mediaDevices.getUserMedia(makeConstraints(streamId, source, settings.videoQuality));
+  } catch (err: any) {
+    log(`[gUM] Primary capture failed:`, err?.message || err);
+    log(`[gUM] Retrying without audio constraints (user may have forgotten to check 'Share tab audio')...`);
+    try {
+      const videoOnlyConstraints = makeConstraints(streamId, source, settings.videoQuality);
+      videoOnlyConstraints.audio = false;
+      return await navigator.mediaDevices.getUserMedia(videoOnlyConstraints);
+    } catch (err2: any) {
+      throw new Error(`Capture failed. Primary: ${err.message}. Video-only fallback: ${err2.message}.`);
+    }
+  }
 }
 
 async function prepareAndRecord(baseStream: MediaStream, meetingId: string): Promise<void> {
   const videoTracks = baseStream.getVideoTracks();
   if (!videoTracks.length) throw new Error('No video track found in captured stream');
 
+  const settings = await getSettings();
   const micStream = await maybeGetMicStream();
   const mixedStream = await setupAudioMixing(baseStream, micStream);
   currentMixedStream = mixedStream;
@@ -210,9 +240,20 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string): Pro
     await audioContext.resume().catch(() => {});
   }
 
-  const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
-    ? 'video/webm;codecs=vp8,opus'
-    : 'video/webm';
+  // Codec selection priority for maximum clarity:
+  // 1. VP9 (Google's high-efficiency codec: razor-sharp text & slides for lectures)
+  // 2. MP4 (H.264: universal compatibility)
+  // 3. VP8 (standard fallback)
+  let mime = 'video/webm';
+  if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')) {
+    mime = 'video/webm;codecs=vp9,opus';
+  } else if (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1,mp4a.40.2')) {
+    mime = 'video/mp4;codecs=avc1,mp4a.40.2';
+  } else if (MediaRecorder.isTypeSupported('video/mp4')) {
+    mime = 'video/mp4';
+  } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')) {
+    mime = 'video/webm;codecs=vp8,opus';
+  }
 
   // Initialize unique session in MeetRecorderDB
   activeSessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -220,12 +261,19 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string): Pro
   chunkSequence = 0;
 
   await recorderDB.createSession(activeSessionId, meetingId, mime);
-  log(`Created recording session in IndexedDB: ${activeSessionId}`);
+  log(`Created recording session in IndexedDB: ${activeSessionId} (${mime})`);
+
+  const bitRates: Record<string, number> = {
+    '720p': 2_500_000,
+    '1080p': 8_000_000,
+    'max': 14_000_000,
+  };
+  const videoBitsPerSecond = bitRates[settings.videoQuality] || 8_000_000;
 
   mediaRecorder = new MediaRecorder(mixedStream, {
     mimeType: mime,
-    videoBitsPerSecond: 3_000_000,
-    audioBitsPerSecond: 128_000,
+    videoBitsPerSecond,
+    audioBitsPerSecond: 192_000,
   });
 
   const started = new Promise<void>((resolve, reject) => {
@@ -273,15 +321,24 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string): Pro
         // 1. Memory-safe chunk assembly from IndexedDB
         log('Assembling video blob via IndexedDB cursor...');
         const rawBlob = await recorderDB.assembleSessionBlob(finishedSessionId, mime);
-        log(`Raw blob assembled: size=${rawBlob.size} bytes. Patching EBML duration (${durationMs}ms)...`);
+        
+        // 2. Format-aware duration / seekability handling
+        let finalVideoBlob = rawBlob;
+        const isWebm = mime.includes('webm');
+        if (isWebm) {
+          log(`Patching EBML duration for WebM (${durationMs}ms)...`);
+          finalVideoBlob = await fixWebmDuration(rawBlob, durationMs);
+          log(`EBML patched: seekable blob size=${finalVideoBlob.size} bytes`);
+        } else {
+          log(`MP4 container assembled: size=${finalVideoBlob.size} bytes`);
+        }
 
-        // 2. EBML Duration & Seekability patch
-        const seekableBlob = await fixWebmDuration(rawBlob, durationMs);
-        log(`EBML patched: seekable blob size=${seekableBlob.size} bytes`);
-
-        // 3. WebVTT Transcript compilation
+        // 3. Subtitle and Plain Text Transcript compilation
         const vttContent = await recorderDB.generateWebVTT(finishedSessionId);
         const vttBlob = new Blob([vttContent], { type: 'text/vtt' });
+
+        const txtContent = await recorderDB.generatePlainText(finishedSessionId);
+        const txtBlob = new Blob([txtContent], { type: 'text/plain' });
 
         // Filenames
         let suffix = meetingId || 'google-meet';
@@ -291,11 +348,18 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string): Pro
         } catch {}
 
         const timestamp = Date.now();
-        const videoFilename = `GoogleMeet-Recording-${suffix}-${timestamp}.webm`;
+        const ext = mime.includes('mp4') ? 'mp4' : 'webm';
+        const videoFilename = `GoogleMeet-Recording-${suffix}-${timestamp}.${ext}`;
+        const txtFilename = `GoogleMeet-Transcript-${suffix}-${timestamp}.txt`;
         const vttFilename = `GoogleMeet-Transcript-${suffix}-${timestamp}.vtt`;
 
-        const videoBlobUrl = URL.createObjectURL(seekableBlob);
+        const videoBlobUrl = URL.createObjectURL(finalVideoBlob);
+        const txtBlobUrl = URL.createObjectURL(txtBlob);
         const vttBlobUrl = URL.createObjectURL(vttBlob);
+
+        // Data URLs as bulletproof fallback that survives context isolation
+        const txtDataUrl = `data:text/plain;charset=utf-8,${encodeURIComponent(txtContent)}`;
+        const vttDataUrl = `data:text/vtt;charset=utf-8,${encodeURIComponent(vttContent)}`;
 
         await recorderDB.updateSessionStatus(finishedSessionId, 'COMPLETED', Date.now());
 
@@ -305,11 +369,17 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string): Pro
           sessionId: finishedSessionId,
           videoBlobUrl,
           videoFilename,
+          txtBlobUrl,
+          txtDataUrl,
+          txtFilename,
+          txtContent,
           vttBlobUrl,
+          vttDataUrl,
           vttFilename,
+          vttContent,
         });
 
-        log('OFFSCREEN_SAVE dispatched for video and subtitles');
+        log('OFFSCREEN_SAVE dispatched for video, text transcript, and subtitles');
       } catch (err) {
         log('Finalization error:', err);
       } finally {
@@ -438,6 +508,11 @@ function attachRpcListener(port: chrome.runtime.Port): void {
         if (typeof msg.videoBlobUrl === 'string') {
           try {
             URL.revokeObjectURL(msg.videoBlobUrl);
+          } catch {}
+        }
+        if (typeof msg.txtBlobUrl === 'string') {
+          try {
+            URL.revokeObjectURL(msg.txtBlobUrl);
           } catch {}
         }
         if (typeof msg.vttBlobUrl === 'string') {
