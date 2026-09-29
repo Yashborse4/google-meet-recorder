@@ -1,373 +1,496 @@
 // src/offscreen.ts
+// Production-Ready Offscreen Recording Engine:
+// - Direct IndexedDB 5s chunk streaming (MeetRecorderDB)
+// - Strict Web Audio routing topology (no sidetone, tab audio to local speakers)
+// - Google Meet mute sync via GainNode
+// - Zero-dependency EBML duration patching (scrubbable WebM)
+// - WebVTT subtitle export alongside video
+// - AudioContext autoplay suspension protection
 
-// Flip this on to include your local mic in the recording mix.
-// NOTE: Offscreen cannot show the initial mic permission prompt.
-// You must "prime" mic permission once from a visible page (popup/options/extension tab)
-// via navigator.mediaDevices.getUserMedia({ audio: true }) before this will succeed.
-const WANT_MIC_MIX = true
+import { recorderDB } from './db';
+import { fixWebmDuration } from './webmFix';
+
+const WANT_MIC_MIX = true;
 
 window.addEventListener('error', (e) => {
-  console.error('[offscreen] window.onerror', e?.message, e?.error)
-})
+  console.error('[offscreen] window.onerror', e?.message, e?.error);
+});
 window.addEventListener('unhandledrejection', (e: any) => {
-  console.error('[offscreen] unhandledrejection', e?.reason || e)
-})
-console.log('[offscreen] script loaded')
+  console.error('[offscreen] unhandledrejection', e?.reason || e);
+});
+console.log('[offscreen] script loaded');
 
-// port plumbing
-let portRef: chrome.runtime.Port | null = null
-function log(...a: any[]) { console.log('[offscreen]', ...a) }
+// Port plumbing
+let portRef: chrome.runtime.Port | null = null;
+function log(...a: any[]) {
+  console.log('[offscreen]', ...a);
+}
 
 function connectPort(): chrome.runtime.Port {
-  try { portRef?.disconnect() } catch {}
-  const p: chrome.runtime.Port = chrome.runtime.connect({ name: 'offscreen' })
-  p.onDisconnect.addListener(() => { log('Port disconnected'); portRef = null })
-  // tell background alive
-  p.postMessage({ type: 'OFFSCREEN_READY' })
-  log('READY signaled via Port')
-  portRef = p
-  return p
+  try {
+    portRef?.disconnect();
+  } catch {}
+  const p: chrome.runtime.Port = chrome.runtime.connect({ name: 'offscreen' });
+  p.onDisconnect.addListener(() => {
+    log('Port disconnected');
+    portRef = null;
+  });
+  p.postMessage({ type: 'OFFSCREEN_READY' });
+  log('READY signaled via Port');
+  portRef = p;
+  attachRpcListener(p);
+  return p;
 }
-function getPort(): chrome.runtime.Port { return portRef ?? connectPort() }
-function respond(req: any, payload: any) { getPort().postMessage({ __respFor: req?.__id, payload }) }
 
-// popup uses this to flip buttons
+function getPort(): chrome.runtime.Port {
+  return portRef ?? connectPort();
+}
+
+function respond(req: any, payload: any) {
+  getPort().postMessage({ __respFor: req?.__id, payload });
+}
+
 function pushState(recording: boolean, extra?: Record<string, any>) {
-  try { (chrome.storage as any)?.session?.set?.({ recording }).catch?.(() => {}) } catch {}
-  getPort().postMessage({ type: 'RECORDING_STATE', recording, ...extra })
+  try {
+    (chrome.storage as any)?.session?.set?.({ recording }).catch?.(() => {});
+  } catch {}
+  getPort().postMessage({ type: 'RECORDING_STATE', recording, ...extra });
 }
-
-const sleep = (ms: number) => new Promise(res => setTimeout(res, ms))
 
 function inferSuffixFromActiveTabUrl(url?: string | null): string {
   try {
-    if (!url) return 'google-meet'
-    const u = new URL(url)
-    const last = u.pathname.split('/').pop() || 'google-meet'
-    return last
-  } catch { return 'google-meet' }
-}
-
-// simple 1-channel RMS meter for debugging
-function attachRmsMeter(track: MediaStreamTrack, label: 'RAW' | 'FINAL') {
-  try {
-    const AC = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext
-    const ctx = new AC()
-    void ctx.resume().catch(() => {})
-    const src = ctx.createMediaStreamSource(new MediaStream([track]))
-    const analyser = ctx.createAnalyser()
-    analyser.fftSize = 256
-    const buf = new Uint8Array(analyser.frequencyBinCount)
-    src.connect(analyser)
-    const id = setInterval(() => {
-      analyser.getByteTimeDomainData(buf)
-      let sum = 0
-      for (let i = 0; i < buf.length; i++) {
-        const x = (buf[i] - 128) / 128
-        sum += x * x
-      }
-      const rms = Math.sqrt(sum / buf.length)
-      console.log('[offscreen]', `${label} input level (rms):`, rms.toFixed(3))
-    }, 1000)
-    track.addEventListener('ended', () => { try { clearInterval(id) } catch {} })
-  } catch (e) {
-    log('meter setup failed (non-fatal)', e)
+    if (!url) return 'google-meet';
+    const u = new URL(url);
+    const last = u.pathname.split('/').pop() || 'google-meet';
+    return last;
+  } catch {
+    return 'google-meet';
   }
 }
 
-// record & mix
+// Active recording state variables
+let mediaRecorder: MediaRecorder | null = null;
+let activeSessionId: string | null = null;
+let sessionStartTime = 0;
+let chunkSequence = 0;
+let capturing = false;
+
+let audioContext: AudioContext | null = null;
+let micGainNode: GainNode | null = null;
+let currentMicTrack: MediaStreamTrack | null = null;
+let currentMixedStream: MediaStream | null = null;
+
+// Microphone capture
 async function maybeGetMicStream(): Promise<MediaStream | null> {
-  if (!WANT_MIC_MIX) return null
+  if (!WANT_MIC_MIX) return null;
   try {
-    // only succeeds if mic permission was previously granted to the extension origin
     const mic = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
-        autoGainControl: true
-      }
-    })
-    const t = mic.getAudioTracks()[0]
-    log('mic stream acquired:', !!t, 'muted:', t?.muted, 'enabled:', t?.enabled)
-    return mic
+        autoGainControl: true,
+      },
+    });
+    const t = mic.getAudioTracks()[0];
+    log('Mic stream acquired:', !!t, 'muted:', t?.muted, 'enabled:', t?.enabled);
+    return mic;
   } catch (e) {
-    log('mic getUserMedia failed (continuing without mic):', e)
-    return null
+    log('Mic getUserMedia failed (continuing tab-only):', e);
+    return null;
   }
 }
 
-function mixAudio(tabStream: MediaStream, micStream: MediaStream | null): MediaStream {
-  const tabAudio = tabStream.getAudioTracks()[0]
-  if (!micStream || !tabAudio) return tabStream
+/**
+ * Strict Web Audio routing topology:
+ * Tab Audio -> audioContext.destination (Speakers, so user hears remote participants)
+ * Tab Audio -> MediaStreamAudioDestinationNode (Recorder mixed destination)
+ * Mic Audio -> GainNode -> MediaStreamAudioDestinationNode (Recorder ONLY)
+ *
+ * CRITICAL PRIVACY & COMFORT CONSTRAINT:
+ * Mic audio is NEVER connected to audioContext.destination to prevent sidetone feedback loops.
+ */
+async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream | null): Promise<MediaStream> {
+  const tabAudio = tabStream.getAudioTracks()[0];
+  const videoTracks = tabStream.getVideoTracks();
 
-  const AC = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext
-  const ctx = new AC()
-  void ctx.resume().catch(() => {})
-  const dst = ctx.createMediaStreamDestination()
-
-  try {
-    const tabSource = ctx.createMediaStreamSource(new MediaStream([tabAudio]))
-    tabSource.connect(dst)
-  } catch (err) {
-    log('tab source connect failed for mixing; using tab audio only', err)
-    return tabStream
+  if (!tabAudio && !micStream) {
+    return tabStream;
   }
 
-  try {
-    const micTrack = micStream.getAudioTracks()[0]
-    if (micTrack) {
-      const micSource = ctx.createMediaStreamSource(new MediaStream([micTrack]))
-      micSource.connect(dst)
+  const AC = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext;
+  audioContext = new AC();
+
+  // Autoplay Policy & Suspension Protection
+  if (audioContext.state === 'suspended') {
+    log('AudioContext suspended on init; attempting resume...');
+    await audioContext.resume().catch((err) => log('AudioContext resume failed:', err));
+  }
+  audioContext.onstatechange = () => {
+    if (audioContext && audioContext.state === 'suspended' && capturing) {
+      log('AudioContext auto-resuming from suspended state');
+      audioContext.resume().catch(() => {});
     }
-  } catch (e) {
-    log('mic source connect failed; continuing with tab audio only', e)
+  };
+
+  const mixedDest = audioContext.createMediaStreamDestination();
+
+  // 1. Route Tab Audio
+  if (tabAudio) {
+    try {
+      const tabSource = audioContext.createMediaStreamSource(new MediaStream([tabAudio]));
+      // Route to local speakers so user can hear participants
+      tabSource.connect(audioContext.destination);
+      // Route to recorder destination
+      tabSource.connect(mixedDest);
+      log('Tab audio connected to speakers and recorder destination');
+    } catch (err) {
+      log('Tab audio source connection failed; using raw tab audio', err);
+      return tabStream;
+    }
   }
 
-  const final = new MediaStream([
-    ...tabStream.getVideoTracks(),
-    ...dst.stream.getAudioTracks()
-  ])
+  // 2. Route Mic Audio through dedicated GainNode for Mute Sync
+  if (micStream) {
+    const micTrack = micStream.getAudioTracks()[0];
+    if (micTrack) {
+      currentMicTrack = micTrack;
+      try {
+        const micSource = audioContext.createMediaStreamSource(new MediaStream([micTrack]));
+        micGainNode = audioContext.createGain();
+        micGainNode.gain.value = 1.0; // unmuted by default
 
-  // DO NOT stop tabAudio here!!! stopping will kill the upstream source
-  return final
+        micSource.connect(micGainNode);
+        // Connect exclusively to recorder destination. NEVER connect to audioContext.destination!
+        micGainNode.connect(mixedDest);
+        log('Mic audio connected to GainNode and recorder destination (sidetone prevented)');
+      } catch (err) {
+        log('Mic audio routing failed:', err);
+      }
+    }
+  }
+
+  return new MediaStream([...videoTracks, ...mixedDest.stream.getAudioTracks()]);
 }
 
-// build constraints using a streamId. try 'tab' first, then 'desktop'
 function makeConstraints(streamId: string, source: 'tab' | 'desktop'): MediaStreamConstraints {
-  const mandatory = { chromeMediaSource: source, chromeMediaSourceId: streamId } as any
+  const mandatory = { chromeMediaSource: source, chromeMediaSourceId: streamId } as any;
   return {
-    audio: {
+    audio: source === 'tab' ? {
       mandatory,
-      optional: [{ googDisableLocalEcho: false }]
+      optional: [{ googDisableLocalEcho: false }],
+    } as any : {
+      mandatory,
     } as any,
     video: {
       mandatory: {
         ...mandatory,
         maxWidth: 1920,
         maxHeight: 1080,
-        maxFrameRate: 30
-      }
-    } as any
-  }
+        maxFrameRate: 30,
+      },
+    } as any,
+  };
 }
 
-// try to record using streamId
-async function captureWithStreamId(streamId: string): Promise<MediaStream> {
-  try {
-    log(`Attempting getUserMedia with streamId ${streamId} source= tab`)
-    const s = await navigator.mediaDevices.getUserMedia(makeConstraints(streamId, 'tab'))
-    return s
-  } catch (e1: any) {
-    log('[gUM] failed for chromeMediaSource=tab:', e1?.name || e1, e1?.message || e1)
-  }
-  log(`Attempting getUserMedia with streamId ${streamId} source= desktop`)
-  return await navigator.mediaDevices.getUserMedia(makeConstraints(streamId, 'desktop'))
+async function captureWithStreamId(streamId: string, source: 'tab' | 'desktop'): Promise<MediaStream> {
+  log(`Capturing getUserMedia with streamId=${streamId} source=${source}`);
+  return await navigator.mediaDevices.getUserMedia(makeConstraints(streamId, source));
 }
 
-let mediaRecorder: MediaRecorder | null = null
-let chunks: BlobPart[] = []
-let capturing = false
+async function prepareAndRecord(baseStream: MediaStream, meetingId: string): Promise<void> {
+  const videoTracks = baseStream.getVideoTracks();
+  if (!videoTracks.length) throw new Error('No video track found in captured stream');
 
-async function prepareAndRecord(baseStream: MediaStream): Promise<void> {
-  const a = baseStream.getAudioTracks()
-  const v = baseStream.getVideoTracks()
-  log('getUserMedia() tracks:', {
-    audioCount: a.length,
-    videoCount: v.length,
-    audioMuted: a[0]?.muted,
-    audioEnabled: a[0]?.enabled
-  })
-  a.forEach((t) => { try { t.enabled = true } catch {} })
+  const micStream = await maybeGetMicStream();
+  const mixedStream = await setupAudioMixing(baseStream, micStream);
+  currentMixedStream = mixedStream;
 
-  if (!a.length) {
-    pushState(false, { warning: 'NO_TAB_AUDIO' })
-  } else {
-    const T = a[0]
-    console.log('[offscreen] audio track settings:', T?.getSettings?.())
-    console.log('[offscreen] audio track muted/enabled:', T?.muted, T?.enabled)
-    T?.addEventListener('mute', () => console.log('[offscreen] track MUTED'))
-    T?.addEventListener('unmute', () => console.log('[offscreen] track UNMUTED'))
-  }
-  if (!v.length) throw new Error('No video track in captured stream')
-
-  // debug meters
-  const rawAudio = baseStream.getAudioTracks()[0]
-  if (rawAudio) attachRmsMeter(rawAudio, 'RAW')
-
-  const micStream = await maybeGetMicStream()
-  const mixedStream = mixAudio(baseStream, micStream)
-
-  const finalAudio = mixedStream.getAudioTracks()[0]
-  if (finalAudio) attachRmsMeter(finalAudio, 'FINAL')
-  if (!finalAudio) log('WARNING: final stream has NO audio track — recording will be silent')
-
-  log('final stream tracks -> video:', mixedStream.getVideoTracks().length, 'audio:', mixedStream.getAudioTracks().length)
-
-  // safety check, not fatal
-  if (rawAudio) {
-    try {
-      const AC = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext
-      const ctx = new AC()
-      await ctx.resume().catch(() => {})
-      const src = ctx.createMediaStreamSource(new MediaStream([rawAudio]))
-      const analyser = ctx.createAnalyser()
-      analyser.fftSize = 256
-      const buf = new Uint8Array(analyser.frequencyBinCount)
-      src.connect(analyser)
-      await sleep(1000)
-      analyser.getByteTimeDomainData(buf)
-      let sum = 0
-      for (let i = 0; i < buf.length; i++) {
-        const x = (buf[i] - 128) / 128
-        sum += x * x
-      }
-      const rms = Math.sqrt(sum / buf.length)
-      if (rms < 0.005) log('no audio energy detected before start')
-    } catch {}
+  // Final check on AudioContext
+  if (audioContext && audioContext.state === 'suspended') {
+    await audioContext.resume().catch(() => {});
   }
 
-  chunks = []
   const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
     ? 'video/webm;codecs=vp8,opus'
-    : 'video/webm'
+    : 'video/webm';
+
+  // Initialize unique session in MeetRecorderDB
+  activeSessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  sessionStartTime = Date.now();
+  chunkSequence = 0;
+
+  await recorderDB.createSession(activeSessionId, meetingId, mime);
+  log(`Created recording session in IndexedDB: ${activeSessionId}`);
 
   mediaRecorder = new MediaRecorder(mixedStream, {
     mimeType: mime,
     videoBitsPerSecond: 3_000_000,
-    audioBitsPerSecond: 128_000
-  })
+    audioBitsPerSecond: 128_000,
+  });
 
   const started = new Promise<void>((resolve, reject) => {
-    const startTimeout = setTimeout(() => reject(new Error('MediaRecorder did not start (timeout)')), 4000)
+    const startTimeout = setTimeout(() => reject(new Error('MediaRecorder did not start (timeout)')), 5000);
 
     mediaRecorder!.onstart = () => {
-      clearTimeout(startTimeout)
-      capturing = true
-      pushState(true)
-      log('MediaRecorder started')
-      resolve()
-    }
+      clearTimeout(startTimeout);
+      capturing = true;
+      pushState(true, { sessionId: activeSessionId, startedAt: sessionStartTime });
+      log('MediaRecorder started with 5s timeslice chunking');
+      resolve();
+    };
 
     mediaRecorder!.onerror = (e: any) => {
-      clearTimeout(startTimeout)
-      log('MediaRecorder error', e)
-      try { mixedStream.getTracks().forEach(t => t.stop()) } catch {}
-      mediaRecorder = null
-      capturing = false
-      pushState(false)
-      reject(new Error(e?.name || 'MediaRecorder error'))
-    }
+      clearTimeout(startTimeout);
+      log('MediaRecorder error', e);
+      cleanupStreams();
+      capturing = false;
+      pushState(false);
+      reject(new Error(e?.name || 'MediaRecorder error'));
+    };
 
+    // FR-MEM-1 & FR-MEM-2: Direct write to IndexedDB every 5 seconds.
+    // Chunks are NOT retained in heap memory!
     mediaRecorder!.ondataavailable = (e: BlobEvent) => {
-      if (e.data && e.data.size) chunks.push(e.data)
-    }
+      if (e.data && e.data.size > 0 && activeSessionId) {
+        const seq = chunkSequence++;
+        const currentId = activeSessionId;
+        recorderDB.writeChunk(currentId, seq, e.data).catch((err) => {
+          log(`Failed to write chunk seq=${seq} to IndexedDB:`, err);
+        });
+      }
+    };
 
     mediaRecorder!.onstop = async () => {
-      try {
-        const blob = new Blob(chunks, { type: mime })
-        log('Finalizing; chunks =', chunks.length, 'blob.size =', blob.size)
+      log('MediaRecorder stopped. Finalizing session...');
+      const finishedSessionId = activeSessionId;
+      const durationMs = Math.max(1000, Date.now() - sessionStartTime);
 
-        // filename suffix
-        let suffix = 'google-meet'
+      try {
+        if (!finishedSessionId) throw new Error('No active session ID on stop');
+
+        await recorderDB.updateSessionStatus(finishedSessionId, 'FINALIZING', Date.now());
+
+        // 1. Memory-safe chunk assembly from IndexedDB
+        log('Assembling video blob via IndexedDB cursor...');
+        const rawBlob = await recorderDB.assembleSessionBlob(finishedSessionId, mime);
+        log(`Raw blob assembled: size=${rawBlob.size} bytes. Patching EBML duration (${durationMs}ms)...`);
+
+        // 2. EBML Duration & Seekability patch
+        const seekableBlob = await fixWebmDuration(rawBlob, durationMs);
+        log(`EBML patched: seekable blob size=${seekableBlob.size} bytes`);
+
+        // 3. WebVTT Transcript compilation
+        const vttContent = await recorderDB.generateWebVTT(finishedSessionId);
+        const vttBlob = new Blob([vttContent], { type: 'text/vtt' });
+
+        // Filenames
+        let suffix = meetingId || 'google-meet';
         try {
-          const tabs = await chrome.tabs.query({ active: true, currentWindow: true })
-          suffix = inferSuffixFromActiveTabUrl(tabs[0]?.url || null)
+          const tabs = await chrome.tabs.query({ url: 'https://meet.google.com/*' });
+          if (tabs[0]?.url) suffix = inferSuffixFromActiveTabUrl(tabs[0].url);
         } catch {}
 
-        const filename = `google-meet-recording-${suffix}-${Date.now()}.webm`
-        const blobUrl = URL.createObjectURL(blob)
-        getPort().postMessage({ type: 'OFFSCREEN_SAVE', filename, blobUrl })
-      } catch (e) {
-        log('Finalize/Save failed', e)
+        const timestamp = Date.now();
+        const videoFilename = `GoogleMeet-Recording-${suffix}-${timestamp}.webm`;
+        const vttFilename = `GoogleMeet-Transcript-${suffix}-${timestamp}.vtt`;
+
+        const videoBlobUrl = URL.createObjectURL(seekableBlob);
+        const vttBlobUrl = URL.createObjectURL(vttBlob);
+
+        await recorderDB.updateSessionStatus(finishedSessionId, 'COMPLETED', Date.now());
+
+        // Transmit save instructions to background
+        getPort().postMessage({
+          type: 'OFFSCREEN_SAVE',
+          sessionId: finishedSessionId,
+          videoBlobUrl,
+          videoFilename,
+          vttBlobUrl,
+          vttFilename,
+        });
+
+        log('OFFSCREEN_SAVE dispatched for video and subtitles');
+      } catch (err) {
+        log('Finalization error:', err);
       } finally {
-        try { mixedStream.getTracks().forEach(t => t.stop()) } catch {}
-        mediaRecorder = null
-        chunks = []
-        capturing = false
-        pushState(false)
+        cleanupStreams();
+        capturing = false;
+        activeSessionId = null;
+        pushState(false);
       }
+    };
+  });
+
+  // Start with 5-second interval
+  mediaRecorder.start(5000);
+
+  // Auto-stop if video track ends (tab navigated / closed)
+  videoTracks[0]?.addEventListener('ended', () => {
+    log('Captured tab video track ended');
+    if (mediaRecorder && capturing) {
+      try {
+        if (mediaRecorder.state === 'recording') {
+          try { mediaRecorder.requestData(); } catch {}
+        }
+        mediaRecorder.stop();
+      } catch {}
     }
-  })
+  });
 
-  mediaRecorder.start(1000)
-
-  // if tab navigates or video track ends, auto-stop
-  mixedStream.getVideoTracks()[0]?.addEventListener('ended', () => {
-    log('Video track ended')
-    if (mediaRecorder && capturing) { try { mediaRecorder.stop() } catch {} }
-  })
-
-  await started
+  await started;
 }
 
-async function startRecordingFromStreamId(streamId: string): Promise<void> {
-  if (capturing) { log('Already recording; ignoring start'); return }
-  const baseStream = await captureWithStreamId(streamId)
-  await prepareAndRecord(baseStream)
+function cleanupStreams() {
+  try {
+    currentMixedStream?.getTracks().forEach((t) => t.stop());
+  } catch {}
+  try {
+    currentMicTrack?.stop();
+  } catch {}
+  try {
+    audioContext?.close().catch?.(() => {});
+  } catch {}
+
+  currentMixedStream = null;
+  currentMicTrack = null;
+  micGainNode = null;
+  audioContext = null;
+  mediaRecorder = null;
 }
 
 function stopRecording() {
   if (!mediaRecorder || !capturing) {
-    console.warn('[offscreen] Stop called but not recording')
-    throw new Error('Not currently recording')
+    log('Stop called but not recording');
+    throw new Error('Not currently recording');
   }
-  try { mediaRecorder.stop() } catch (e) { console.error('[offscreen] Stop error', e); throw e }
+  try {
+    if (mediaRecorder.state === 'recording') {
+      try { mediaRecorder.requestData(); } catch {}
+    }
+    mediaRecorder.stop();
+  } catch (e) {
+    log('Error stopping mediaRecorder', e);
+    throw e;
+  }
 }
 
-// port rpc
-const rpcPort = getPort()
-rpcPort.onMessage.addListener(async (msg: any) => {
-  try {
-    if (msg?.type === 'OFFSCREEN_START') {
-      const streamId = msg.streamId as string | undefined
-      if (!streamId) return respond(msg, { ok: false, error: 'Missing streamId' })
-      try {
-        // wait until actually starts
-        await startRecordingFromStreamId(streamId)
-        return respond(msg, { ok: true })
-      } catch (e: any) {
-        return respond(msg, { ok: false, error: `${e?.name || 'Error'}: ${e?.message || e}` })
+// Port RPC listener — attached to every new port (including reconnections)
+function attachRpcListener(port: chrome.runtime.Port): void {
+  port.onMessage.addListener(async (msg: any) => {
+    try {
+      if (msg?.type === 'OFFSCREEN_START') {
+        const streamId = msg.streamId as string | undefined;
+        const source = msg.source as 'tab' | 'desktop' | undefined;
+        const meetingId = (msg.meetingId as string | undefined) || 'google-meet';
+        if (!streamId || !source) return respond(msg, { ok: false, error: 'Missing streamId or source' });
+
+        try {
+          if (capturing) {
+            return respond(msg, { ok: false, error: 'Already recording' });
+          }
+          const baseStream = await captureWithStreamId(streamId, source);
+          await prepareAndRecord(baseStream, meetingId);
+          return respond(msg, { ok: true, sessionId: activeSessionId });
+        } catch (e: any) {
+          return respond(msg, { ok: false, error: `${e?.name || 'Error'}: ${e?.message || e}` });
+        }
       }
-    }
 
-    if (msg?.type === 'OFFSCREEN_START_TAB') {
-      // background must provide streamId
-      return respond(msg, { ok: false, error: 'Use OFFSCREEN_START with streamId from background' })
-    }
+      if (msg?.type === 'OFFSCREEN_STOP') {
+        try {
+          stopRecording();
+          return respond(msg, { ok: true });
+        } catch (e: any) {
+          return respond(msg, { ok: false, error: String(e?.message || e) });
+        }
+      }
 
-    if (msg?.type === 'OFFSCREEN_STOP') {
-      try { stopRecording(); return respond(msg, { ok: true }) }
-      catch (e) { return respond(msg, { ok: false, error: String(e) }) }
-    }
+      if (msg?.type === 'OFFSCREEN_STATUS') {
+        return respond(msg, {
+          recording: capturing,
+          sessionId: activeSessionId,
+          startedAt: sessionStartTime,
+        });
+      }
 
-    if (msg?.type === 'OFFSCREEN_STATUS') {
-      let recording = false
-      try {
-        const res = await (chrome.storage as any)?.session?.get?.(['recording'])
-        recording = !!res?.recording
-      } catch {}
-      return respond(msg, { recording })
-    }
+      // FR-AV-3: Google Meet Mute Sync
+      if (msg?.type === 'MEET_MUTE_TOGGLED') {
+        const isMuted = !!msg.isMuted;
+        log(`Meet mute event received: ${isMuted ? 'MUTED' : 'UNMUTED'}`);
+        if (micGainNode && audioContext) {
+          micGainNode.gain.setValueAtTime(isMuted ? 0 : 1, audioContext.currentTime);
+        }
+        if (currentMicTrack) {
+          currentMicTrack.enabled = !isMuted;
+        }
+        return;
+      }
 
-    if (msg?.type === 'DIAG_ECHO') {
-      return respond(msg, { ok: true, pong: 'offscreen-alive' })
-    }
+      // FR-CAP-2: Scraped Caption Ingestion
+      if (msg?.type === 'CAPTION_RECORD' && activeSessionId) {
+        const relativeTimeMs = Math.max(0, Date.now() - sessionStartTime);
+        recorderDB.writeCaption(activeSessionId, relativeTimeMs, msg.speaker || 'Speaker', msg.text || '').catch(() => {});
+        return;
+      }
 
-    if (msg?.type === 'REVOKE_BLOB_URL' && typeof msg.blobUrl === 'string') {
-      try { URL.revokeObjectURL(msg.blobUrl) } catch {}
-      return
-    }
-  } catch (e) {
-    console.error('[offscreen] error', e)
-    respond(msg, { ok: false, error: String(e) })
-  }
-})
+      // Storage Garbage Collection on confirmed download
+      if (msg?.type === 'REVOKE_BLOB_URL') {
+        if (typeof msg.videoBlobUrl === 'string') {
+          try {
+            URL.revokeObjectURL(msg.videoBlobUrl);
+          } catch {}
+        }
+        if (typeof msg.vttBlobUrl === 'string') {
+          try {
+            URL.revokeObjectURL(msg.vttBlobUrl);
+          } catch {}
+        }
+        if (typeof msg.sessionId === 'string') {
+          log(`Storage cleanup for session ${msg.sessionId}`);
+          recorderDB.deleteSession(msg.sessionId).catch((err) => log('Cleanup error:', err));
+        }
+        return;
+      }
 
-// allow background to check before port is ready
+      if (msg?.type === 'HEARTBEAT') {
+        if (audioContext && audioContext.state === 'suspended') {
+          audioContext.resume().catch(() => {});
+        }
+        return;
+      }
+    } catch (e) {
+      console.error('[offscreen] Port message handler error', e);
+      respond(msg, { ok: false, error: String(e) });
+    }
+  });
+}
+
+// Establish initial port (attachRpcListener is called inside connectPort)
+getPort();
+
+// Broadcast listener
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   try {
-    if (msg?.type === 'OFFSCREEN_PING') { sendResponse({ ok: true, via: 'onMessage' }); return true }
-    if (msg?.type === 'OFFSCREEN_CONNECT') { connectPort(); sendResponse({ ok: true }); return true }
-  } catch (e) { sendResponse({ ok: false, error: String(e) }) }
-  return false
-})
+    if (msg?.type === 'OFFSCREEN_PING') {
+      sendResponse({ ok: true, via: 'onMessage' });
+      return true;
+    }
+    if (msg?.type === 'OFFSCREEN_CONNECT') {
+      connectPort();
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (msg?.type === 'MEET_MUTE_TOGGLED') {
+      const isMuted = !!msg.isMuted;
+      if (micGainNode && audioContext) {
+        micGainNode.gain.setValueAtTime(isMuted ? 0 : 1, audioContext.currentTime);
+      }
+      if (currentMicTrack) {
+        currentMicTrack.enabled = !isMuted;
+      }
+    }
+  } catch (e) {
+    sendResponse({ ok: false, error: String(e) });
+  }
+  return false;
+});

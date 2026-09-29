@@ -1,9 +1,22 @@
 // src/popup.ts
+// Extension Popup:
+// - Orphan / Crash Recovery detection (MeetRecorderDB)
+// - Microphone permission priming & verification
+// - Manual Start / Stop tab recording controls
+// - Manual Transcript download
+
+import { recorderDB, SessionRecord } from './db';
+import { fixWebmDuration } from './webmFix';
 
 const saveBtn = document.getElementById('save') as HTMLButtonElement | null;
 const micBtn = document.getElementById('enable-mic') as HTMLButtonElement | null;
 const startBtn = document.getElementById('start-rec') as HTMLButtonElement | null;
 const stopBtn = document.getElementById('stop-rec') as HTMLButtonElement | null;
+
+const recoveryCard = document.getElementById('recovery-card') as HTMLDivElement | null;
+const recoveryMsg = document.getElementById('recovery-msg') as HTMLParagraphElement | null;
+const recoverBtn = document.getElementById('recover-btn') as HTMLButtonElement | null;
+const discardBtn = document.getElementById('discard-btn') as HTMLButtonElement | null;
 
 function setUI(recording: boolean) {
   if (!startBtn || !stopBtn) return;
@@ -15,16 +28,16 @@ function toast(msg: string) {
   console.log('[popup]', msg);
 }
 
-// open a full tab to prompt for mic permission
+// Open full tab to grant mic permissions
 async function openMicSetupTab() {
   await chrome.tabs.create({ url: chrome.runtime.getURL('micsetup.html') });
 }
 
-// reflect mic permission state in the button label
+// Check microphone status and update button state
 async function refreshMicButton() {
   if (!micBtn || !('permissions' in navigator)) return;
   try {
-    // @ts-ignore - chrome supports this permission name
+    // @ts-ignore
     const status = await (navigator as any).permissions.query({ name: 'microphone' });
     const set = () => {
       micBtn.textContent =
@@ -34,19 +47,101 @@ async function refreshMicButton() {
           ? 'Microphone Blocked'
           : 'Enable Microphone';
       micBtn.disabled = status.state === 'granted';
-      micBtn.title =
-        status.state === 'granted'
-          ? 'Microphone is already enabled for this extension'
-          : 'Grant microphone permission so your voice is included in recordings';
+      if (status.state === 'granted') {
+        micBtn.classList.add('success');
+      } else {
+        micBtn.classList.remove('success');
+      }
     };
     set();
     status.onchange = set;
-  } catch {
-    // permissions API might not be available
+  } catch {}
+}
+
+// FR-EDGE-2: Orphaned Session & Crash Recovery Check
+let pendingRecoverySession: SessionRecord | null = null;
+
+async function checkOrphanedRecordings() {
+  try {
+    const orphaned = await recorderDB.getOrphanedSessions();
+    if (orphaned.length > 0) {
+      pendingRecoverySession = orphaned[0]; // Recover most recent
+      const dateStr = new Date(pendingRecoverySession.startedAt).toLocaleTimeString();
+      const approxDurationSec = (pendingRecoverySession.chunkCount || 1) * 5;
+
+      if (recoveryCard && recoveryMsg) {
+        recoveryMsg.textContent = `Incomplete recording detected from ${dateStr} (~${approxDurationSec}s, ${pendingRecoverySession.chunkCount} chunks).`;
+        recoveryCard.style.display = 'block';
+      }
+    }
+  } catch (err) {
+    console.error('[popup] Error checking orphaned recordings:', err);
   }
 }
 
-// init: read current recording state & update UI
+recoverBtn?.addEventListener('click', async () => {
+  if (!pendingRecoverySession || !recoverBtn) return;
+  recoverBtn.disabled = true;
+  recoverBtn.textContent = 'Assembling…';
+
+  try {
+    const sess = pendingRecoverySession;
+    const approxDurationMs = Math.max(1000, (sess.chunkCount || 1) * 5000);
+
+    // Assemble Blob from IndexedDB chunks
+    const rawBlob = await recorderDB.assembleSessionBlob(sess.sessionId, sess.mimeType || 'video/webm');
+    // Patch EBML duration
+    const seekableBlob = await fixWebmDuration(rawBlob, approxDurationMs);
+
+    // Subtitle transcript
+    const vttContent = await recorderDB.generateWebVTT(sess.sessionId);
+    const vttBlob = new Blob([vttContent], { type: 'text/vtt' });
+
+    const videoUrl = URL.createObjectURL(seekableBlob);
+    const vttUrl = URL.createObjectURL(vttBlob);
+
+    const suffix = sess.meetingId || 'recovered';
+    const timestamp = Date.now();
+
+    chrome.downloads.download({
+      url: videoUrl,
+      filename: `GoogleMeet-Recovered-${suffix}-${timestamp}.webm`,
+      saveAs: true,
+    });
+
+    chrome.downloads.download({
+      url: vttUrl,
+      filename: `GoogleMeet-Recovered-Transcript-${suffix}-${timestamp}.vtt`,
+      saveAs: false,
+    });
+
+    // Cleanup session from IndexedDB
+    await recorderDB.deleteSession(sess.sessionId);
+    if (recoveryCard) recoveryCard.style.display = 'none';
+    pendingRecoverySession = null;
+    toast('Orphaned recording successfully recovered and downloaded.');
+  } catch (err) {
+    console.error('[popup] Recovery failed:', err);
+    alert(`Could not recover recording: ${err}`);
+  } finally {
+    recoverBtn.disabled = false;
+    recoverBtn.textContent = 'Recover & Download';
+  }
+});
+
+discardBtn?.addEventListener('click', async () => {
+  if (!pendingRecoverySession) return;
+  try {
+    await recorderDB.deleteSession(pendingRecoverySession.sessionId);
+    if (recoveryCard) recoveryCard.style.display = 'none';
+    pendingRecoverySession = null;
+    toast('Orphaned recording discarded.');
+  } catch (err) {
+    console.error('[popup] Discard failed:', err);
+  }
+});
+
+// Init: sync recording state, check mic, and check for crashes
 void (async () => {
   try {
     const st = await chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATUS' });
@@ -55,9 +150,10 @@ void (async () => {
     setUI(false);
   }
   refreshMicButton().catch(() => {});
+  checkOrphanedRecordings().catch(() => {});
 })();
 
-// react to background/offscreen state pings
+// Listen for background state broadcasts
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'RECORDING_STATE') setUI(!!msg.recording);
   if (msg?.type === 'RECORDING_SAVED') {
@@ -66,7 +162,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
 });
 
-// mic permission priming
+// Microphone permission priming
 micBtn?.addEventListener('click', async () => {
   try {
     if ('permissions' in navigator) {
@@ -82,10 +178,9 @@ micBtn?.addEventListener('click', async () => {
         return;
       }
     }
-    // try inline
     try {
       const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-      s.getTracks().forEach(t => t.stop());
+      s.getTracks().forEach((t) => t.stop());
       alert('Microphone enabled for the extension.');
       await refreshMicButton();
     } catch {
@@ -97,73 +192,48 @@ micBtn?.addEventListener('click', async () => {
   }
 });
 
-// manual transcript download
+// Manual transcript download (.txt)
 saveBtn?.addEventListener('click', async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) return;
 
-  const res = await chrome.tabs
-    .sendMessage(tab.id, { type: 'GET_TRANSCRIPT' })
-    .catch((_e) => {
-      toast('No transcript on this page');
-      return undefined;
-    });
-
+  const res = await chrome.tabs.sendMessage(tab.id, { type: 'GET_TRANSCRIPT' }).catch(() => undefined);
   const transcript = (res as any)?.transcript as string | undefined;
+
   if (!transcript?.trim()) {
     toast('Transcript is empty');
+    alert('Transcript is currently empty. Make sure Captions are turned on in Google Meet.');
     return;
   }
 
   const blob = new Blob([transcript], { type: 'text/plain' });
   const url = URL.createObjectURL(blob);
-  const suffix =
-    new URL(tab.url ?? 'https://meet.google.com').pathname.split('/').pop() || 'google-meet';
+  const suffix = new URL(tab.url ?? 'https://meet.google.com').pathname.split('/').pop() || 'google-meet';
 
   chrome.downloads.download(
-    { url, filename: `google-meet-transcript-${suffix}-${Date.now()}.txt`, saveAs: true },
+    { url, filename: `GoogleMeet-Transcript-${suffix}-${Date.now()}.txt`, saveAs: true },
     () => URL.revokeObjectURL(url)
   );
 });
 
 let inFlight = false;
 
-// start recording. also resets transcript buffer for a fresh session
+// Start recording button
 startBtn?.addEventListener('click', async () => {
   if (!startBtn || !stopBtn || inFlight) return;
   inFlight = true;
   startBtn.disabled = true;
 
   try {
-    // auto-prime mic if not granted
-    if ('permissions' in navigator) {
-      try {
-        // @ts-ignore
-        const status = await (navigator as any).permissions.query({ name: 'microphone' });
-        if (status.state !== 'granted') {
-          try {
-            const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-            s.getTracks().forEach(t => t.stop());
-          } catch { 
-            // continue with tab-only audio
-            }
-        }
-      } catch { 
-        // do nothing
-        }
-    }
-
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) throw new Error('No active tab');
+    if (!tab?.id) throw new Error('No active tab found. Please navigate to a Google Meet call.');
 
-    // reset transcript buffer so a new meeting starts clean
-    await chrome.tabs.sendMessage(tab.id, { type: 'RESET_TRANSCRIPT' }).catch(() => {
-      // if not on a Google Meet page yet, the transcript will just be empty later.
-    });
+    // Reset content script transcript buffer
+    await chrome.tabs.sendMessage(tab.id, { type: 'RESET_TRANSCRIPT' }).catch(() => {});
 
     const resp = await chrome.runtime.sendMessage({ type: 'START_RECORDING', tabId: tab.id });
-    if (!resp) throw new Error('No response from background');
-    if (resp.ok === false) throw new Error(resp.error || 'Failed to start');
+    if (!resp) throw new Error('No response from background service worker');
+    if (resp.ok === false) throw new Error(resp.error || 'Failed to start recording');
 
     setUI(true);
     toast('Recording started');
@@ -176,7 +246,7 @@ startBtn?.addEventListener('click', async () => {
   }
 });
 
-// stop recording
+// Stop recording button
 stopBtn?.addEventListener('click', async () => {
   if (!startBtn || !stopBtn || inFlight) return;
   inFlight = true;
@@ -184,9 +254,9 @@ stopBtn?.addEventListener('click', async () => {
 
   try {
     const resp = await chrome.runtime.sendMessage({ type: 'STOP_RECORDING' });
-    if (!resp) throw new Error('No response from background');
-    if (resp.ok === false) throw new Error(resp.error || 'Failed to stop');
-    toast('Stopping… finalizing…');
+    if (!resp) throw new Error('No response from background service worker');
+    if (resp.ok === false) throw new Error(resp.error || 'Failed to stop recording');
+    toast('Stopping and compiling recording…');
   } catch (e: any) {
     console.error('[popup] STOP_RECORDING error', e);
     alert(`Failed to stop recording:\n${e?.message || e}`);

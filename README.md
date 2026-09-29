@@ -121,20 +121,23 @@ This compiles TypeScript via `ts-loader` and copies the HTML/manifest to `dist/`
 ## Project structure
 ```
 .
+├─ REQUIREMENTS.md      # Specification (v2.0 production requirements)
 ├─ manifest.json
 ├─ webpack.config.js
 ├─ tsconfig.json
 ├─ package.json
-├─ popup.html
+├─ popup.html           # Popup with crash recovery card & controls
 ├─ offscreen.html
 ├─ micsetup.html
 ├─ src/
-│  ├─ background.ts     # MV3 service worker (creates offscreen, coordinates streams)
-│  ├─ offscreen.ts      # runs recorder; mixes mic + tab; saves blob via downloads
-│  ├─ popup.ts          # popup UI handlers: transcript, mic, start/stop
-│  ├─ scrapingScript.ts # parses Google Meet captions from the DOM
-│  └─ micsetup.ts       # dedicated visible page to request mic permission
-└─ dist/                # build output (generated)
+│  ├─ background.ts     # MV3 service worker (port keep-alive, tab capture, downloads)
+│  ├─ offscreen.ts      # Web Audio routing, IDB 5s streaming, EBML patching, VTT export
+│  ├─ db.ts             # MeetRecorderDB IndexedDB engine (sessions, chunks, captions)
+│  ├─ webmFix.ts        # Zero-dependency EBML duration patcher (scrubbable WebM)
+│  ├─ popup.ts          # Popup UI handlers: recovery, mic setup, start/stop, txt transcript
+│  ├─ scrapingScript.ts # Meet control bar button injection, floating badge, mute sync, captions
+│  └─ micsetup.ts       # Dedicated visible page to request mic permission
+└─ dist/                # Build output (generated)
 ```
 
 ## Configuration knobs
