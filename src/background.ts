@@ -368,117 +368,132 @@ chrome.commands?.onCommand.addListener(async (command) => {
 
 // Runtime message router
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  (async () => {
-    // 1. Start Recording (from popup or injected Meet button)
-    if (msg?.type === 'START_RECORDING') {
-      const targetTabId = typeof msg.tabId === 'number' ? msg.tabId : sender.tab?.id;
-      if (typeof targetTabId !== 'number') {
-        sendResponse({ ok: false, error: 'Target tabId not provided' });
-        return;
-      }
+  // 1. Synchronous handlers
+  if (msg?.type === 'GET_RECORDING_STATUS') {
+    sendResponse({
+      recording: lastKnownRecording,
+      tabId: activeRecordingTabId,
+      sessionId: activeRecordingSessionId,
+      startedAt: activeRecordingStartTime,
+    });
+    return false;
+  }
 
-      bglog('START_RECORDING requested for tabId', targetTabId);
-      try {
-        await ensureOffscreen();
-      } catch (e: any) {
-        sendResponse({ ok: false, error: `Offscreen document setup failed: ${e?.message || e}` });
-        return;
-      }
+  if (msg?.type === 'MEET_MUTE_TOGGLED') {
+    if (offscreenPort) {
+      offscreenPort.postMessage(msg);
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
 
-      try {
+  if (msg?.type === 'CAPTION_RECORD') {
+    if (offscreenPort) {
+      offscreenPort.postMessage(msg);
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  // 2. Asynchronous handlers (return true to keep message port open)
+  if (msg?.type === 'START_RECORDING') {
+    handleStartRecording(msg, sender, sendResponse);
+    return true;
+  }
+
+  if (msg?.type === 'STOP_RECORDING' || msg?.type === 'FINALIZE_RECORDING') {
+    handleStopRecording(msg, sendResponse);
+    return true;
+  }
+
+  // 3. Fallthrough: not handled by background, return false immediately so port is not held open
+  return false;
+});
+
+async function handleStartRecording(msg: any, sender: chrome.runtime.MessageSender, sendResponse: (res: any) => void) {
+  try {
+    const targetTabId = typeof msg.tabId === 'number' ? msg.tabId : sender.tab?.id;
+    if (typeof targetTabId !== 'number') {
+      sendResponse({ ok: false, error: 'Target tabId not provided' });
+      return;
+    }
+
+    bglog('START_RECORDING requested for tabId', targetTabId);
+    try {
+      await ensureOffscreen();
+    } catch (e: any) {
+      sendResponse({ ok: false, error: `Offscreen document setup failed: ${e?.message || e}` });
+      return;
+    }
+
+    try {
+      let streamId = msg.streamId as string | undefined;
+      let source = (msg.source as 'tab' | 'desktop') || 'tab';
+
+      if (!streamId) {
         const isFromInPage = typeof sender.tab?.id === 'number';
         const captureInfo = await getStreamIdForTab(targetTabId, isFromInPage);
-        let meetingId = 'google-meet';
-        try {
-          const tab = await chrome.tabs.get(targetTabId);
-          if (tab.url) {
-            const pathParts = new URL(tab.url).pathname.split('/');
-            meetingId = pathParts[pathParts.length - 1] || 'google-meet';
-          }
-        } catch {}
-
-        const r = await postToOffscreen({ type: 'OFFSCREEN_START', streamId: captureInfo.streamId, source: captureInfo.source, meetingId });
-        if (r?.ok) {
-          activeRecordingTabId = targetTabId;
-          activeRecordingSessionId = r.sessionId;
-          activeRecordingStartTime = Date.now();
-          broadcastState(true);
-          sendResponse({ ok: true });
-        } else {
-          sendResponse({ ok: false, error: r?.error || 'Failed to start in offscreen' });
-        }
-      } catch (e: any) {
-        bglog('START_RECORDING failed:', e);
-        sendResponse({ ok: false, error: `START_RECORDING failed: ${e?.message || e}` });
+        streamId = captureInfo.streamId;
+        source = captureInfo.source;
       }
-      return;
-    }
 
-    // 2. Stop Recording (from popup, injected Meet button, or auto-disconnect)
-    if (msg?.type === 'STOP_RECORDING' || msg?.type === 'FINALIZE_RECORDING') {
-      bglog('STOP_RECORDING / FINALIZE requested:', msg.type);
+      let meetingId = 'google-meet';
       try {
-        if (msg.type === 'FINALIZE_RECORDING') {
-          const settings = await getSettings();
-          if (!settings.autoStopOnExit) {
-            bglog('FINALIZE_RECORDING ignored as autoStopOnExit is false in settings');
-            sendResponse({ ok: true });
-            return;
-          }
+        const tab = await chrome.tabs.get(targetTabId);
+        if (tab.url) {
+          const pathParts = new URL(tab.url).pathname.split('/');
+          meetingId = pathParts[pathParts.length - 1] || 'google-meet';
         }
+      } catch {}
 
-        if (activeRecordingTabId) {
-          try {
-            await chrome.tabs.sendMessage(activeRecordingTabId, { type: 'FLUSH_CAPTIONS' });
-            await wait(150);
-          } catch {}
-        }
-        if (offscreenPort && lastKnownRecording) {
-          const r = await postToOffscreen({ type: 'OFFSCREEN_STOP' });
-          bglog('OFFSCREEN_STOP response', r);
-        }
+      const r = await postToOffscreen({ type: 'OFFSCREEN_START', streamId, source, meetingId });
+      if (r?.ok) {
+        activeRecordingTabId = targetTabId;
+        activeRecordingSessionId = r.sessionId;
+        activeRecordingStartTime = Date.now();
+        broadcastState(true);
         sendResponse({ ok: true });
-      } catch (e: any) {
-        sendResponse({ ok: false, error: `Stop failed: ${e?.message || e}` });
+      } else {
+        sendResponse({ ok: false, error: r?.error || 'Failed to start in offscreen' });
       }
-      return;
+    } catch (e: any) {
+      bglog('START_RECORDING failed:', e);
+      sendResponse({ ok: false, error: `START_RECORDING failed: ${e?.message || e}` });
     }
-
-    // 3. Query status
-    if (msg?.type === 'GET_RECORDING_STATUS') {
-      sendResponse({
-        recording: lastKnownRecording,
-        tabId: activeRecordingTabId,
-        sessionId: activeRecordingSessionId,
-        startedAt: activeRecordingStartTime,
-      });
-      return;
-    }
-
-    // 4. Relay Google Meet mute toggle to offscreen GainNode
-    if (msg?.type === 'MEET_MUTE_TOGGLED') {
-      if (offscreenPort) {
-        offscreenPort.postMessage(msg);
-      }
-      sendResponse({ ok: true });
-      return;
-    }
-
-    // 5. Relay Caption record to offscreen for IndexedDB persistence
-    if (msg?.type === 'CAPTION_RECORD') {
-      if (offscreenPort) {
-        offscreenPort.postMessage(msg);
-      }
-      sendResponse({ ok: true });
-      return;
-    }
-  })().catch((err) => {
-    console.error('[background] Error handling runtime message', err);
+  } catch (err: any) {
+    console.error('[background] Error handling START_RECORDING', err);
     sendResponse({ ok: false, error: String(err) });
-  });
+  }
+}
 
-  return true;
-});
+async function handleStopRecording(msg: any, sendResponse: (res: any) => void) {
+  try {
+    bglog('STOP_RECORDING / FINALIZE requested:', msg.type);
+    if (msg.type === 'FINALIZE_RECORDING') {
+      const settings = await getSettings();
+      if (!settings.autoStopOnExit) {
+        bglog('FINALIZE_RECORDING ignored as autoStopOnExit is false in settings');
+        sendResponse({ ok: true });
+        return;
+      }
+    }
+
+    if (activeRecordingTabId) {
+      try {
+        await chrome.tabs.sendMessage(activeRecordingTabId, { type: 'FLUSH_CAPTIONS' });
+        await wait(150);
+      } catch {}
+    }
+    if (offscreenPort && lastKnownRecording) {
+      const r = await postToOffscreen({ type: 'OFFSCREEN_STOP' });
+      bglog('OFFSCREEN_STOP response', r);
+    }
+    sendResponse({ ok: true });
+  } catch (e: any) {
+    console.error('[background] Error handling STOP_RECORDING', e);
+    sendResponse({ ok: false, error: `Stop failed: ${e?.message || e}` });
+  }
+}
 
 // Auto-finalize recording if user closes the active recorded Meet tab
 chrome.tabs.onRemoved.addListener(async (tabId) => {

@@ -195,7 +195,6 @@ function makeConstraints(streamId: string, source: 'tab' | 'desktop', quality: '
   return {
     audio: {
       mandatory,
-      optional: source === 'tab' ? [{ googDisableLocalEcho: false }] : [],
     } as any,
     video: {
       mandatory: {
@@ -548,12 +547,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   try {
     if (msg?.type === 'OFFSCREEN_PING') {
       sendResponse({ ok: true, via: 'onMessage' });
-      return true;
+      return false;
     }
     if (msg?.type === 'OFFSCREEN_CONNECT') {
       connectPort();
       sendResponse({ ok: true });
-      return true;
+      return false;
     }
     if (msg?.type === 'MEET_MUTE_TOGGLED') {
       const isMuted = !!msg.isMuted;
@@ -563,9 +562,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (currentMicTrack) {
         currentMicTrack.enabled = !isMuted;
       }
+      sendResponse({ ok: true });
+      return false;
     }
   } catch (e) {
     sendResponse({ ok: false, error: String(e) });
+    return false;
   }
   return false;
 });
+

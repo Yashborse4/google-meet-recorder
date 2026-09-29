@@ -365,12 +365,50 @@ startBtn?.addEventListener('click', async () => {
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) throw new Error('No active tab found. Please navigate to a Google Meet call.');
+    if (!tab?.id) throw new Error('No active tab found.');
+
+    if (tab.url && !tab.url.includes('meet.google.com')) {
+      throw new Error('Please switch to your Google Meet call tab before starting recording.');
+    }
 
     // Reset content script transcript buffer
     await chrome.tabs.sendMessage(tab.id, { type: 'RESET_TRANSCRIPT' }).catch(() => {});
 
-    const resp = await chrome.runtime.sendMessage({ type: 'START_RECORDING', tabId: tab.id });
+    // Obtain mediaStreamId directly under user gesture in the popup
+    let streamId: string | undefined;
+    let source: 'tab' | 'desktop' = 'tab';
+
+    try {
+      streamId = await new Promise<string>((resolve, reject) => {
+        chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id }, (id?: string) => {
+          const err = chrome.runtime.lastError;
+          if (err || !id) {
+            return reject(err ? new Error(err.message) : new Error('No streamId returned by tabCapture'));
+          }
+          resolve(id);
+        });
+      });
+      source = 'tab';
+    } catch (tabErr: any) {
+      console.warn('[popup] tabCapture.getMediaStreamId failed, trying desktopCapture prompt:', tabErr);
+      streamId = await new Promise<string>((resolve, reject) => {
+        chrome.desktopCapture.chooseDesktopMedia(['tab', 'audio'], (id?: string) => {
+          const err = chrome.runtime.lastError;
+          if (err) return reject(new Error(err.message));
+          if (!id) return reject(new Error('Sharing was cancelled'));
+          resolve(id);
+        });
+      });
+      source = 'desktop';
+    }
+
+    const resp = await chrome.runtime.sendMessage({
+      type: 'START_RECORDING',
+      tabId: tab.id,
+      streamId,
+      source,
+    });
+
     if (!resp) throw new Error('No response from background service worker');
     if (resp.ok === false) throw new Error(resp.error || 'Failed to start recording');
 

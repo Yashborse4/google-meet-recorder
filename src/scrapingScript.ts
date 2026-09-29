@@ -465,12 +465,18 @@ function init() {
   rootObserver.observe(document.body, { childList: true, subtree: true });
 
   // Query background for active recording state
-  chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATUS' }, (res) => {
-    if (res?.recording) {
-      if (res.startedAt) recordingStartTime = res.startedAt;
-      updateRecordingUI(true);
-    }
-  });
+  try {
+    chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATUS' }, (res) => {
+      if (chrome.runtime.lastError) {
+        // Prevent "Unchecked runtime.lastError" in console
+        return;
+      }
+      if (res?.recording) {
+        if (res.startedAt) recordingStartTime = res.startedAt;
+        updateRecordingUI(true);
+      }
+    });
+  } catch {}
 
   console.log('[MeetContentScript] Content script initialized.');
 }
@@ -487,19 +493,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.startedAt) recordingStartTime = msg.startedAt;
     updateRecordingUI(!!msg.recording);
     sendResponse({ ok: true });
-    return true;
+    return false;
   }
 
   if (msg?.type === 'GET_TRANSCRIPT' || msg?.type === 'FLUSH_CAPTIONS') {
     flushPendingCaptions();
     sendResponse({ ok: true, transcript: transcriptBuffer.join('\n') });
-    return true;
+    return false;
   }
 
   if (msg?.type === 'RESET_TRANSCRIPT') {
     prior.clear();
     transcriptBuffer.length = 0;
     sendResponse({ ok: true });
-    return true;
+    return false;
   }
+
+  return false;
 });
+
