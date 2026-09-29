@@ -1,24 +1,69 @@
 {
-    "manifest_version": 3,
-    "name": "Google Meet Transcript + Recorder",
-    "version": "1.1.0",
-    "permissions": ["activeTab", "downloads", "tabCapture", "offscreen", "storage", "tabs", "desktopCapture", "power"],
-    "host_permissions": ["https://meet.google.com/*"],
-    "action": { "default_popup": "popup.html" },
-    "background": { "service_worker": "background.js", "type": "module" },
-    "content_scripts": [
-      { "matches": ["https://meet.google.com/*"], "js": ["scrapingScript.js"], "run_at": "document_idle" }
-    ],
-    "web_accessible_resources": [
-      { "resources": ["offscreen.html", "micsetup.html"], "matches": ["<all_urls>"] }
-    ],
-    "commands": {
-      "toggle-recording": {
-        "suggested_key": {
-          "default": "Alt+R",
-          "mac": "Alt+R"
-        },
-        "description": "Toggle Google Meet recording"
-      }
+  "manifest_version": 3,
+  "name": "Google Meet Transcript + Recorder",
+  "version": "1.2.0",
+  "description": "Automatically records Google Meet video and downloads timestamped meeting transcripts with customizable preferences.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Google Meet Recorder",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "permissions": [
+    "activeTab",
+    "downloads",
+    "tabCapture",
+    "offscreen",
+    "storage",
+    "tabs",
+    "desktopCapture",
+    "power"
+  ],
+  "host_permissions": [
+    "https://meet.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://meet.google.com/*"],
+      "js": ["scrapingScript.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "offscreen.html",
+        "micsetup.html",
+        "icons/icon16.png",
+        "icons/icon32.png",
+        "icons/icon48.png",
+        "icons/icon128.png",
+        "icons/icon.svg"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "commands": {
+    "toggle-recording": {
+      "suggested_key": {
+        "default": "Alt+R",
+        "mac": "Alt+R"
+      },
+      "description": "Toggle Google Meet recording"
     }
   }
+}

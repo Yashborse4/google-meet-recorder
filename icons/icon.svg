@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2a2d34" />
+      <stop offset="100%" stop-color="#141518" />
+    </linearGradient>
+
+    <!-- Glowing Red Dot Gradient -->
+    <radialGradient id="redGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ff6b60" />
+      <stop offset="60%" stop-color="#ea4335" />
+      <stop offset="100%" stop-color="#ea4335" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <!-- Squircle App Tile Background -->
+  <rect x="6" y="6" width="116" height="116" rx="26" ry="26" fill="url(#bgGrad)" stroke="#4b505c" stroke-width="2" />
+
+  <!-- Video Camera Body -->
+  <rect x="28" y="44" width="44" height="40" rx="8" ry="8" fill="#ffffff" />
+
+  <!-- Video Camera Lens Cone -->
+  <path d="M72 54 L98 40 L98 88 L72 74 Z" fill="#ffffff" stroke-linejoin="round" />
+
+  <!-- Transcription Audio Soundwave Bars (Cyan / Electric Blue) -->
+  <rect x="36" y="54" width="5" height="20" rx="2.5" fill="#0ea5e9" />
+  <rect x="47" y="48" width="5" height="32" rx="2.5" fill="#0ea5e9" />
+  <rect x="58" y="52" width="5" height="24" rx="2.5" fill="#0ea5e9" />
+
+  <!-- Glowing Red Recording Indicator Dot -->
+  <circle cx="95" cy="30" r="14" fill="url(#redGlow)" opacity="0.6" />
+  <circle cx="95" cy="30" r="9" fill="#ea4335" />
+</svg>

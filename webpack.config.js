@@ -34,6 +34,7 @@ module.exports = {
         { from: 'popup.html',     to: 'popup.html' },
         { from: 'offscreen.html', to: 'offscreen.html', noErrorOnMissing: true },
         { from: 'micsetup.html', to: 'micsetup.html' },
+        { from: 'icons', to: 'icons', noErrorOnMissing: true },
       ]
     })
   ]

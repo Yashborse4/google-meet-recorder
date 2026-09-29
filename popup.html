@@ -19,7 +19,6 @@
         --primary-glow: rgba(234, 67, 53, 0.25);
         --green: #23a55a;
         --green-bg: rgba(35, 165, 90, 0.15);
-        --blue: #3b82f6;
       }
 
       * {
@@ -53,18 +52,12 @@
         gap: 8px;
       }
 
-      .logo-icon {
+      .logo-icon-img {
         width: 24px;
         height: 24px;
-        background: linear-gradient(135deg, #ea4335, #c5221f);
-        border-radius: 7px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: #fff;
-        font-size: 13px;
-        font-weight: 800;
+        border-radius: 6px;
         box-shadow: 0 2px 8px var(--primary-glow);
+        display: block;
       }
 
       h1 {
@@ -592,7 +585,7 @@
     <!-- Header -->
     <div class="header">
       <div class="title-group">
-        <div class="logo-icon">M</div>
+        <img src="icons/icon48.png" alt="Meet Recorder" class="logo-icon-img" />
         <h1>Meet Recorder</h1>
       </div>
       <div class="header-actions">
