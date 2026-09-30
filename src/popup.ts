@@ -11,7 +11,7 @@ import { fixWebmDuration } from './webmFix';
 import { getSettings, saveSettings, ExtensionSettings } from './settings';
 
 // Recording UI elements
-const micBtn = document.getElementById('enable-mic') as HTMLButtonElement | null;
+const toggleMic = document.getElementById('toggle-mic-enable') as HTMLInputElement | null;
 const micDesc = document.getElementById('mic-desc') as HTMLDivElement | null;
 const startBtn = document.getElementById('start-rec') as HTMLButtonElement | null;
 const pauseBtn = document.getElementById('pause-rec') as HTMLButtonElement | null;
@@ -144,9 +144,23 @@ btnSettingsBack?.addEventListener('click', () => {
   showSettings(false);
 });
 
+function updateMicDescription(enabled: boolean) {
+  if (!micDesc) return;
+  if (!enabled) {
+    micDesc.textContent = 'Microphone disabled (not recorded)';
+    micDesc.style.color = 'var(--text-muted)';
+  } else {
+    micDesc.textContent = 'Only records when mic is open in Meet';
+    micDesc.style.color = '#81c995';
+  }
+}
+
 // Settings synchronization
 async function initSettings() {
   const current = await getSettings();
+
+  if (toggleMic) toggleMic.checked = current.autoMixMic;
+  updateMicDescription(current.autoMixMic);
 
   if (settingSaveVideo) settingSaveVideo.checked = current.saveVideo;
   if (settingSaveTxt) settingSaveTxt.checked = current.saveTxtTranscript;
@@ -167,6 +181,11 @@ async function initSettings() {
       autoStopOnExit: settingAutoStop ? settingAutoStop.checked : true,
     };
     await saveSettings(updated);
+    if (toggleMic && settingAutoMic) {
+      toggleMic.checked = settingAutoMic.checked;
+      updateMicDescription(settingAutoMic.checked);
+      chrome.runtime.sendMessage({ type: 'MIC_SETTING_TOGGLED', enabled: settingAutoMic.checked }).catch(() => {});
+    }
     toast('Settings saved');
   };
 
@@ -200,30 +219,11 @@ async function openMicSetupTab() {
   await chrome.tabs.create({ url: chrome.runtime.getURL('micsetup.html') });
 }
 
-// Check microphone status and update button state
-async function refreshMicButton() {
-  if (!micBtn || !('permissions' in navigator)) return;
-  try {
-    // @ts-ignore
-    const status = await (navigator as any).permissions.query({ name: 'microphone' });
-    const set = () => {
-      const granted = status.state === 'granted';
-      if (granted) {
-        chrome.storage.local.set({ micPermissionGranted: true }).catch(() => {});
-      }
-      micBtn.textContent = granted ? '✓ Active' : status.state === 'denied' ? 'Blocked' : 'Enable';
-      micBtn.disabled = granted;
-      if (granted) {
-        micBtn.classList.add('granted');
-        if (micDesc) micDesc.textContent = 'Your voice is recorded & mixed';
-      } else {
-        micBtn.classList.remove('granted');
-        if (micDesc) micDesc.textContent = 'Permission needed to record your voice';
-      }
-    };
-    set();
-    status.onchange = set;
-  } catch {}
+// Synchronize microphone permission and toggle state
+async function syncMicState() {
+  const current = await getSettings();
+  if (toggleMic) toggleMic.checked = current.autoMixMic;
+  updateMicDescription(current.autoMixMic);
 }
 
 // FR-EDGE-2: Orphaned Session & Crash Recovery Check
@@ -334,7 +334,7 @@ void (async () => {
   } catch {
     setUI(false);
   }
-  refreshMicButton().catch(() => {});
+  syncMicState().catch(() => {});
   checkOrphanedRecordings().catch(() => {});
   initSettings().catch(() => {});
 })();
@@ -349,38 +349,57 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'TRANSCRIPT_SAVED') {
     toast(`Transcript saved: ${msg.filename || 'transcript.txt'}`);
   }
+  if (msg?.type === 'MIC_PERMISSION_GRANTED') {
+    if (toggleMic) toggleMic.checked = true;
+    if (settingAutoMic) settingAutoMic.checked = true;
+    updateMicDescription(true);
+    void (async () => {
+      const cur = await getSettings();
+      cur.autoMixMic = true;
+      await saveSettings(cur);
+      chrome.runtime.sendMessage({ type: 'MIC_SETTING_TOGGLED', enabled: true }).catch(() => {});
+    })();
+  }
 });
 
-// Microphone permission priming
-micBtn?.addEventListener('click', async () => {
-  try {
-    if ('permissions' in navigator) {
-      // @ts-ignore
-      const p = await (navigator as any).permissions.query({ name: 'microphone' });
-      if (p.state === 'granted') {
-        alert('Microphone is already enabled for this extension.');
-        await refreshMicButton();
-        return;
-      }
-      if (p.state === 'denied') {
-        await openMicSetupTab();
-        return;
-      }
-    }
+// Microphone toggle switch handler (allows enabling and disabling mic anytime)
+toggleMic?.addEventListener('change', async () => {
+  const shouldEnable = !!toggleMic.checked;
+  if (shouldEnable) {
+    let hasPermission = false;
     try {
-      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-      s.getTracks().forEach((t) => t.stop());
-      await chrome.storage.local.set({ micPermissionGranted: true });
-      chrome.runtime.sendMessage({ type: 'MIC_PERMISSION_GRANTED' }).catch(() => {});
-      alert('Microphone enabled for the extension.');
-      await refreshMicButton();
-    } catch {
-      await openMicSetupTab();
+      if ('permissions' in navigator) {
+        // @ts-ignore
+        const p = await (navigator as any).permissions.query({ name: 'microphone' });
+        hasPermission = p.state === 'granted';
+      }
+    } catch {}
+
+    if (!hasPermission) {
+      try {
+        const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+        s.getTracks().forEach((t) => t.stop());
+        hasPermission = true;
+        await chrome.storage.local.set({ micPermissionGranted: true });
+      } catch {
+        // Fallback to dedicated mic setup popup if popup getUserMedia is denied
+        await openMicSetupTab();
+        toggleMic.checked = false;
+        updateMicDescription(false);
+        return;
+      }
     }
-  } catch (e) {
-    console.error('[popup] mic enable flow error', e);
-    alert('Could not open the microphone setup page. Please try again.');
   }
+
+  const currentSettings = await getSettings();
+  currentSettings.autoMixMic = shouldEnable;
+  await saveSettings(currentSettings);
+
+  if (settingAutoMic) settingAutoMic.checked = shouldEnable;
+  updateMicDescription(shouldEnable);
+
+  chrome.runtime.sendMessage({ type: 'MIC_SETTING_TOGGLED', enabled: shouldEnable }).catch(() => {});
+  toast(shouldEnable ? 'Microphone enabled' : 'Microphone disabled');
 });
 
 let inFlight = false;

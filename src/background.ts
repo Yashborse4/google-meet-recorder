@@ -419,6 +419,14 @@ chrome.commands?.onCommand.addListener(async (command) => {
           activeRecordingStartTime = Date.now();
           activeRecordingSessionId = r.sessionId;
           broadcastState(true);
+
+          // Query current Meet mute state to ensure initial sync
+          chrome.tabs.sendMessage(tab.id, { type: 'QUERY_MUTE_STATE' }, (res) => {
+            if (chrome.runtime.lastError) return;
+            if (res && typeof res.isMuted === 'boolean') {
+              try { offscreenPort?.postMessage({ type: 'MEET_MUTE_TOGGLED', isMuted: res.isMuted }); } catch {}
+            }
+          });
         }
       } catch (err) {
         bglog('Shortcut start recording error:', err);
@@ -442,6 +450,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg?.type === 'MEET_MUTE_TOGGLED') {
+    if (offscreenPort) {
+      offscreenPort.postMessage(msg);
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (msg?.type === 'MIC_SETTING_TOGGLED') {
     if (offscreenPort) {
       offscreenPort.postMessage(msg);
     }
@@ -573,6 +589,18 @@ async function handleStartRecording(msg: any, sender: chrome.runtime.MessageSend
         activeRecordingSessionId = r.sessionId;
         activeRecordingStartTime = Date.now();
         broadcastState(true);
+
+        // Query current Meet mute state to guarantee instant synchronization
+        chrome.tabs.sendMessage(targetTabId, { type: 'QUERY_MUTE_STATE' }, (res) => {
+          if (chrome.runtime.lastError) return;
+          if (res && typeof res.isMuted === 'boolean') {
+            try {
+              offscreenPort?.postMessage({ type: 'MEET_MUTE_TOGGLED', isMuted: res.isMuted });
+              bglog(`Queried Meet mute state on start: isMuted=${res.isMuted}`);
+            } catch {}
+          }
+        });
+
         sendResponse({ ok: true });
       } else {
         sendResponse({ ok: false, error: r?.error || 'Failed to start in offscreen' });

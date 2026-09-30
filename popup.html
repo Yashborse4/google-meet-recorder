@@ -647,13 +647,16 @@
           <div id="start-time-info" class="start-time-info">Started at: <strong>--:--</strong></div>
         </div>
 
-        <!-- Microphone Permission & Status Card -->
+        <!-- Microphone Status & Toggle Card -->
         <div class="mic-card">
           <div class="mic-info">
-            <div class="mic-title">🎙️ Your Voice (Mic)</div>
-            <div id="mic-desc" class="mic-desc">Mixes your voice into the recording</div>
+            <div class="mic-title">🎙️ Record Microphone</div>
+            <div id="mic-desc" class="mic-desc">Only records when mic is open in Meet</div>
           </div>
-          <button id="enable-mic" class="btn-mic-enable">Enable</button>
+          <label class="switch" title="Enable or disable microphone recording">
+            <input type="checkbox" id="toggle-mic-enable" checked />
+            <span class="slider"></span>
+          </label>
         </div>
 
         <!-- Action Buttons -->

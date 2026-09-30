@@ -103,7 +103,20 @@ let micGainNode: GainNode | null = null;
 let currentMicTrack: MediaStreamTrack | null = null;
 let currentMixedStream: MediaStream | null = null;
 
-let isMeetMuted = false;
+// Default to MUTED (closed): never capture mic until Google Meet explicitly confirms mic is open!
+let isMeetMuted = true;
+let isMicEnabledBySetting = true;
+
+function updateMicState() {
+  const shouldRecordMic = isMicEnabledBySetting && !isMeetMuted;
+  if (micGainNode && audioContext) {
+    micGainNode.gain.setValueAtTime(shouldRecordMic ? 1.0 : 0.0, audioContext.currentTime);
+  }
+  if (currentMicTrack) {
+    currentMicTrack.enabled = shouldRecordMic;
+  }
+  log(`Mic state updated: recording=${shouldRecordMic} (settingEnabled=${isMicEnabledBySetting}, meetMuted=${isMeetMuted})`);
+}
 
 // Microphone capture
 async function maybeGetMicStream(): Promise<MediaStream | null> {
@@ -196,14 +209,16 @@ async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream |
       try {
         const micSource = audioContext.createMediaStreamSource(new MediaStream([micTrack]));
         micGainNode = audioContext.createGain();
-        // Respect current Google Meet mute state (prevents "hot mic" on start if user joined muted)
-        micGainNode.gain.value = isMeetMuted ? 0 : 1.0;
-        currentMicTrack.enabled = !isMeetMuted;
+
+        // Enforce settings and Google Meet mute status
+        const settings = await getSettings();
+        isMicEnabledBySetting = !!settings.autoMixMic;
+        updateMicState();
 
         micSource.connect(micGainNode);
         // Connect exclusively to recorder destination. NEVER connect to audioContext.destination!
         micGainNode.connect(mixedDest);
-        log(`Mic audio connected (sidetone prevented, initial state: ${isMeetMuted ? 'MUTED' : 'UNMUTED'})`);
+        log(`Mic audio connected (sidetone prevented, initial state: ${!isMeetMuted && isMicEnabledBySetting ? 'OPEN' : 'MUTED/SILENCED'})`);
       } catch (err) {
         log('Mic audio routing failed:', err);
       }
@@ -505,6 +520,7 @@ function cleanupStreams() {
   micGainNode = null;
   audioContext = null;
   mediaRecorder = null;
+  isMeetMuted = true;
 }
 
 function stopRecording() {
@@ -597,12 +613,14 @@ function attachRpcListener(port: chrome.runtime.Port): void {
         const isMuted = !!msg.isMuted;
         isMeetMuted = isMuted;
         log(`Meet mute event received: ${isMuted ? 'MUTED' : 'UNMUTED'}`);
-        if (micGainNode && audioContext) {
-          micGainNode.gain.setValueAtTime(isMuted ? 0 : 1, audioContext.currentTime);
-        }
-        if (currentMicTrack) {
-          currentMicTrack.enabled = !isMuted;
-        }
+        updateMicState();
+        return;
+      }
+
+      if (msg?.type === 'MIC_SETTING_TOGGLED') {
+        isMicEnabledBySetting = !!msg.enabled;
+        log(`Mic setting event received: enabled=${isMicEnabledBySetting}`);
+        updateMicState();
         return;
       }
 
@@ -668,12 +686,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.type === 'MEET_MUTE_TOGGLED') {
       const isMuted = !!msg.isMuted;
       isMeetMuted = isMuted;
-      if (micGainNode && audioContext) {
-        micGainNode.gain.setValueAtTime(isMuted ? 0 : 1, audioContext.currentTime);
-      }
-      if (currentMicTrack) {
-        currentMicTrack.enabled = !isMuted;
-      }
+      updateMicState();
+      sendResponse({ ok: true });
+      return false;
+    }
+    if (msg?.type === 'MIC_SETTING_TOGGLED') {
+      isMicEnabledBySetting = !!msg.enabled;
+      updateMicState();
       sendResponse({ ok: true });
       return false;
     }

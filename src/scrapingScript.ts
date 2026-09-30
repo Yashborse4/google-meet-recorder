@@ -223,28 +223,68 @@ function updateRecordingUI(recording: boolean, paused: boolean = false) {
 }
 
 // --- 3. Google Meet Mute Sync Observer ("Hot Mic" Privacy Protection) ---
-function checkMeetMuteState() {
-  const micBtn =
-    document.querySelector<HTMLElement>('button[data-is-muted]') ||
-    document.querySelector<HTMLElement>('button[aria-label*="microphone" i]');
+function findMeetMicButton(): HTMLElement | null {
+  // 1. Direct data-is-muted attribute (Google Meet standard attribute)
+  const withData = document.querySelector<HTMLElement>('button[data-is-muted], div[data-is-muted], [role="button"][data-is-muted]');
+  if (withData) return withData;
 
-  if (!micBtn) return;
-
-  // Google Meet sets data-is-muted="true" | "false", or aria-label="Turn on microphone" (meaning it is currently off/muted)
-  const isMutedAttr = micBtn.getAttribute('data-is-muted');
-  const ariaLabel = (micBtn.getAttribute('aria-label') || '').toLowerCase();
-
-  let isMuted = false;
-  if (isMutedAttr !== null) {
-    isMuted = isMutedAttr === 'true';
-  } else if (ariaLabel.includes('turn on microphone') || ariaLabel.includes('unmute')) {
-    isMuted = true;
+  // 2. Button with standard hotkey in aria-label (Ctrl+D / ⌘+D is unique to mic in Google Meet across languages)
+  const allButtons = document.querySelectorAll<HTMLElement>('button, div[role="button"]');
+  for (const b of allButtons) {
+    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+    if ((aria.includes('ctrl + d') || aria.includes('ctrl+d') || aria.includes('⌘ + d') || aria.includes('⌘+d')) && !aria.includes('camera') && !aria.includes('video')) {
+      return b;
+    }
   }
 
-  if (lastKnownMuteState !== isMuted) {
+  // 3. Fallback: aria-label containing "microphone" / language variants
+  for (const b of allButtons) {
+    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+    if ((aria.includes('microphone') || aria.includes('micrófono') || aria.includes('microfone') || aria.includes('mikrofon') || aria.includes('micro')) && !aria.includes('setting') && !aria.includes('option') && !aria.includes('device') && !aria.includes('more')) {
+      return b;
+    }
+  }
+
+  return null;
+}
+
+function getMeetMuteState(): boolean {
+  const micBtn = findMeetMicButton();
+  if (!micBtn) {
+    // If mic button cannot be located (e.g. lobby or loading), default to MUTED (closed) for safety
+    return true;
+  }
+
+  // 1. Check data-is-muted attribute
+  const dataMuted = micBtn.getAttribute('data-is-muted') || micBtn.closest('[data-is-muted]')?.getAttribute('data-is-muted');
+  if (dataMuted !== null && dataMuted !== undefined) {
+    return dataMuted === 'true';
+  }
+
+  // 2. Check aria-label
+  const aria = (micBtn.getAttribute('aria-label') || '').toLowerCase();
+  // In Meet: "Turn on microphone" means it is currently MUTED.
+  // "Turn off microphone" means it is currently UNMUTED (open).
+  if (aria.includes('turn on') || aria.includes('unmute') || aria.includes('activar') || aria.includes('ativar') || aria.includes('activer') || aria.includes('einschalten')) {
+    return true;
+  }
+  if (aria.includes('turn off') || aria.includes('mute') || aria.includes('desactivar') || aria.includes('désactiver') || aria.includes('ausschalten') || aria.includes('stumm')) {
+    return false;
+  }
+
+  // Default to muted if uncertain
+  return true;
+}
+
+function checkMeetMuteState(force = false) {
+  const isMuted = getMeetMuteState();
+  if (force || lastKnownMuteState !== isMuted) {
     lastKnownMuteState = isMuted;
     chrome.runtime.sendMessage({ type: 'MEET_MUTE_TOGGLED', isMuted }).catch(() => {});
-    console.log(`[MeetContentScript] Detected Google Meet mute state change: isMuted=${isMuted}`);
+    if (floatingBadge) {
+      floatingBadge.title = isMuted ? 'Meet Mic: Muted' : 'Meet Mic: Open / Recording voice';
+    }
+    console.log(`[MeetContentScript] Detected Google Meet mute state change: isMuted=${isMuted} (forced=${force})`);
   }
 }
 
@@ -632,6 +672,16 @@ function init() {
     });
   } catch {}
 
+  // User action listeners to immediately detect mute toggles (click or Ctrl+D)
+  document.addEventListener('click', () => {
+    setTimeout(() => checkMeetMuteState(), 80);
+  });
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
+      setTimeout(() => checkMeetMuteState(), 80);
+    }
+  });
+
   console.log('[MeetContentScript] Content script initialized.');
 }
 
@@ -646,7 +696,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'RECORDING_STATE') {
     if (msg.startedAt) recordingStartTime = msg.startedAt;
     updateRecordingUI(!!msg.recording, !!msg.paused);
+    if (msg.recording) {
+      // Force sync mute state to background and offscreen on recording start
+      setTimeout(() => checkMeetMuteState(true), 100);
+    }
     sendResponse({ ok: true });
+    return false;
+  }
+
+  if (msg?.type === 'QUERY_MUTE_STATE') {
+    const isMuted = getMeetMuteState();
+    sendResponse({ ok: true, isMuted });
     return false;
   }
 
