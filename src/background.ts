@@ -15,6 +15,7 @@ let lastKnownPaused = false;
 let activeRecordingTabId: number | null = null;
 let activeRecordingSessionId: string | null = null;
 let activeRecordingStartTime = 0;
+let activeRecordingRealStartTime = 0;
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 function bglog(...a: any[]) {
@@ -43,7 +44,7 @@ function broadcastState(recording: boolean, extra?: Record<string, any>) {
 
   // Power & Sleep prevention: Keep display & system awake, prevent tab discarding
   try {
-    if (recording && !lastKnownPaused) {
+    if (recording) {
       chrome.power?.requestKeepAwake('display');
       if (activeRecordingTabId) {
         chrome.tabs.update(activeRecordingTabId, { autoDiscardable: false }).catch(() => {});
@@ -76,6 +77,7 @@ function broadcastState(recording: boolean, extra?: Record<string, any>) {
     tabId: activeRecordingTabId,
     sessionId: activeRecordingSessionId,
     startedAt: activeRecordingStartTime,
+    realStartTime: activeRecordingRealStartTime,
     ...extra,
   };
 
@@ -159,10 +161,12 @@ chrome.runtime.onConnect.addListener((port) => {
       lastKnownRecording = !!msg.recording;
       if (msg.sessionId) activeRecordingSessionId = msg.sessionId;
       if (msg.startedAt) activeRecordingStartTime = msg.startedAt;
+      if (msg.realStartTime) activeRecordingRealStartTime = msg.realStartTime;
       if (!lastKnownRecording) {
         activeRecordingTabId = null;
         activeRecordingSessionId = null;
         activeRecordingStartTime = 0;
+        activeRecordingRealStartTime = 0;
       }
       broadcastState(lastKnownRecording, msg);
     }
@@ -417,6 +421,7 @@ chrome.commands?.onCommand.addListener(async (command) => {
         if (r?.ok) {
           activeRecordingTabId = tab.id;
           activeRecordingStartTime = Date.now();
+          activeRecordingRealStartTime = activeRecordingStartTime;
           activeRecordingSessionId = r.sessionId;
           broadcastState(true);
 
@@ -439,14 +444,33 @@ chrome.commands?.onCommand.addListener(async (command) => {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // 1. Synchronous handlers
   if (msg?.type === 'GET_RECORDING_STATUS') {
-    sendResponse({
-      recording: lastKnownRecording,
-      paused: lastKnownPaused,
-      tabId: activeRecordingTabId,
-      sessionId: activeRecordingSessionId,
-      startedAt: activeRecordingStartTime,
-    });
-    return false;
+    (async () => {
+      try {
+        const hasOff = await hasOffscreenContext();
+        if (hasOff) {
+          await ensureOffscreen();
+          const st = await postToOffscreen({ type: 'OFFSCREEN_STATUS' });
+          if (st) {
+            lastKnownRecording = !!st.recording;
+            lastKnownPaused = !!st.paused;
+            if (st.sessionId) activeRecordingSessionId = st.sessionId;
+            if (st.startedAt) activeRecordingStartTime = st.startedAt;
+            if (st.realStartTime) activeRecordingRealStartTime = st.realStartTime;
+          }
+        }
+      } catch (e) {
+        bglog('Error in GET_RECORDING_STATUS offscreen query:', e);
+      }
+      sendResponse({
+        recording: lastKnownRecording,
+        paused: lastKnownPaused,
+        tabId: activeRecordingTabId,
+        sessionId: activeRecordingSessionId,
+        startedAt: activeRecordingStartTime,
+        realStartTime: activeRecordingRealStartTime,
+      });
+    })();
+    return true;
   }
 
   if (msg?.type === 'MEET_MUTE_TOGGLED') {
@@ -588,6 +612,7 @@ async function handleStartRecording(msg: any, sender: chrome.runtime.MessageSend
         activeRecordingTabId = targetTabId;
         activeRecordingSessionId = r.sessionId;
         activeRecordingStartTime = Date.now();
+        activeRecordingRealStartTime = activeRecordingStartTime;
         broadcastState(true);
 
         // Query current Meet mute state to guarantee instant synchronization

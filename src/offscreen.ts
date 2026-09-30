@@ -55,6 +55,9 @@ function connectPort(): chrome.runtime.Port {
     try {
       p.postMessage({ type: 'OFFSCREEN_READY' });
       log('READY signaled via Port');
+      if (capturing) {
+        pushState(true, { sessionId: activeSessionId, startedAt: getEffectiveStartTime(), realStartTime: sessionStartTime, paused: isPaused });
+      }
     } catch (e) {
       log('Failed to signal READY:', e);
     }
@@ -97,6 +100,17 @@ let sessionStartTime = 0;
 let chunkSequence = 0;
 let capturing = false;
 let isPaused = false;
+let totalPausedTime = 0;
+let lastPauseTime = 0;
+
+function getEffectiveStartTime() {
+  const currentPause = isPaused && lastPauseTime > 0 ? (Date.now() - lastPauseTime) : 0;
+  return sessionStartTime + totalPausedTime + currentPause;
+}
+
+function getActiveDuration() {
+  return Math.max(0, Date.now() - getEffectiveStartTime());
+}
 
 let audioContext: AudioContext | null = null;
 let micGainNode: GainNode | null = null;
@@ -329,6 +343,8 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string, sour
   // Initialize unique session in MeetRecorderDB
   activeSessionId = crypto.randomUUID();
   sessionStartTime = Date.now();
+  totalPausedTime = 0;
+  lastPauseTime = 0;
   chunkSequence = 0;
 
   await recorderDB.createSession(activeSessionId, meetingId, mime);
@@ -361,7 +377,7 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string, sour
       clearTimeout(startTimeout);
       capturing = true;
       isPaused = false;
-      pushState(true, { sessionId: activeSessionId, startedAt: sessionStartTime, paused: false });
+      pushState(true, { sessionId: activeSessionId, startedAt: getEffectiveStartTime(), realStartTime: sessionStartTime, paused: false });
       log('MediaRecorder started with 5s timeslice chunking');
       resolve();
     };
@@ -396,7 +412,7 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string, sour
     mediaRecorder!.onstop = async () => {
       log('MediaRecorder stopped. Finalizing session...');
       const finishedSessionId = activeSessionId;
-      const durationMs = Math.max(1000, Date.now() - sessionStartTime);
+      const durationMs = Math.max(1000, getActiveDuration());
 
       try {
         if (!finishedSessionId) throw new Error('No active session ID on stop');
@@ -578,7 +594,8 @@ function attachRpcListener(port: chrome.runtime.Port): void {
           if (!mediaRecorder || mediaRecorder.state !== 'recording') throw new Error('Not recording');
           mediaRecorder.pause();
           isPaused = true;
-          pushState(true, { sessionId: activeSessionId, startedAt: sessionStartTime, paused: true });
+          lastPauseTime = Date.now();
+          pushState(true, { sessionId: activeSessionId, startedAt: getEffectiveStartTime(), realStartTime: sessionStartTime, paused: true });
           log('mediaRecorder.pause() executed');
           return respond(msg, { ok: true });
         } catch (e: any) {
@@ -590,8 +607,12 @@ function attachRpcListener(port: chrome.runtime.Port): void {
         try {
           if (!mediaRecorder || mediaRecorder.state !== 'paused') throw new Error('Not paused');
           mediaRecorder.resume();
+          if (lastPauseTime > 0) {
+            totalPausedTime += Date.now() - lastPauseTime;
+            lastPauseTime = 0;
+          }
           isPaused = false;
-          pushState(true, { sessionId: activeSessionId, startedAt: sessionStartTime, paused: false });
+          pushState(true, { sessionId: activeSessionId, startedAt: getEffectiveStartTime(), realStartTime: sessionStartTime, paused: false });
           log('mediaRecorder.resume() executed');
           return respond(msg, { ok: true });
         } catch (e: any) {
@@ -604,7 +625,8 @@ function attachRpcListener(port: chrome.runtime.Port): void {
           recording: capturing,
           paused: isPaused,
           sessionId: activeSessionId,
-          startedAt: sessionStartTime,
+          startedAt: getEffectiveStartTime(),
+          realStartTime: sessionStartTime,
         });
       }
 
@@ -626,7 +648,7 @@ function attachRpcListener(port: chrome.runtime.Port): void {
 
       // FR-CAP-2: Scraped Caption Ingestion
       if (msg?.type === 'CAPTION_RECORD' && activeSessionId) {
-        const relativeTimeMs = Math.max(0, Date.now() - sessionStartTime);
+        const relativeTimeMs = getActiveDuration();
         recorderDB.writeCaption(activeSessionId, relativeTimeMs, msg.speaker || 'Speaker', msg.text || '').catch(() => {});
         return;
       }

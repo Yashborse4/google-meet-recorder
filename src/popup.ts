@@ -57,7 +57,7 @@ function formatDuration(ms: number): string {
   return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 }
 
-function setUI(recording: boolean, startedAt?: number, paused = false) {
+function setUI(recording: boolean, startedAt?: number, paused = false, realStart?: number) {
   if (!startBtn || !stopBtn) return;
   startBtn.disabled = recording;
   stopBtn.disabled = !recording;
@@ -79,8 +79,9 @@ function setUI(recording: boolean, startedAt?: number, paused = false) {
     if (timerCard) timerCard.classList.add('active');
 
     const effectiveStart = startedAt && startedAt > 0 ? startedAt : Date.now();
+    const resolvedRealStart = realStart && realStart > 0 ? realStart : effectiveStart;
     if (startTimeInfo) {
-      const timeStr = new Date(effectiveStart).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const timeStr = new Date(resolvedRealStart).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       startTimeInfo.innerHTML = `Started at: <strong>${timeStr}</strong>`;
     }
 
@@ -330,7 +331,7 @@ discardBtn?.addEventListener('click', async () => {
 void (async () => {
   try {
     const st = await chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATUS' });
-    setUI(!!st?.recording, st?.startedAt, !!st?.paused);
+    setUI(!!st?.recording, st?.startedAt, !!st?.paused, st?.realStartTime);
   } catch {
     setUI(false);
   }
@@ -341,7 +342,7 @@ void (async () => {
 
 // Listen for background state broadcasts
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === 'RECORDING_STATE') setUI(!!msg.recording, msg.startedAt, !!msg.paused);
+  if (msg?.type === 'RECORDING_STATE') setUI(!!msg.recording, msg.startedAt, !!msg.paused, msg.realStartTime);
   if (msg?.type === 'RECORDING_SAVED') {
     toast(`Video saved: ${msg.filename || 'recording.webm'}`);
     setUI(false);
