@@ -11,6 +11,7 @@ import { getSettings } from './settings';
 let offscreenPort: chrome.runtime.Port | null = null;
 let offscreenReady = false;
 let lastKnownRecording = false;
+let lastKnownPaused = false;
 let activeRecordingTabId: number | null = null;
 let activeRecordingSessionId: string | null = null;
 let activeRecordingStartTime = 0;
@@ -20,10 +21,16 @@ function bglog(...a: any[]) {
   console.log('[background]', ...a);
 }
 
-function setBadge(recording: boolean) {
+
+
+function setBadge(recording: boolean, paused: boolean = false) {
   try {
-    chrome.action.setBadgeText({ text: recording ? 'REC' : '' });
-    chrome.action.setBadgeBackgroundColor({ color: '#EA4335' });
+    let badgeText = '';
+    if (recording) {
+      badgeText = paused ? 'PAUSE' : 'REC';
+    }
+    chrome.action.setBadgeText({ text: badgeText });
+    chrome.action.setBadgeBackgroundColor({ color: paused ? '#F59E0B' : '#EA4335' });
   } catch {}
 }
 
@@ -31,11 +38,12 @@ let heartbeatTimer: any = null;
 
 function broadcastState(recording: boolean, extra?: Record<string, any>) {
   lastKnownRecording = recording;
-  setBadge(recording);
+  lastKnownPaused = !!extra?.paused;
+  setBadge(recording, lastKnownPaused);
 
   // Power & Sleep prevention: Keep display & system awake, prevent tab discarding
   try {
-    if (recording) {
+    if (recording && !lastKnownPaused) {
       chrome.power?.requestKeepAwake('display');
       if (activeRecordingTabId) {
         chrome.tabs.update(activeRecordingTabId, { autoDiscardable: false }).catch(() => {});
@@ -64,6 +72,7 @@ function broadcastState(recording: boolean, extra?: Record<string, any>) {
   const payload = {
     type: 'RECORDING_STATE',
     recording,
+    paused: lastKnownPaused,
     tabId: activeRecordingTabId,
     sessionId: activeRecordingSessionId,
     startedAt: activeRecordingStartTime,
@@ -424,6 +433,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === 'GET_RECORDING_STATUS') {
     sendResponse({
       recording: lastKnownRecording,
+      paused: lastKnownPaused,
       tabId: activeRecordingTabId,
       sessionId: activeRecordingSessionId,
       startedAt: activeRecordingStartTime,
@@ -490,6 +500,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg?.type === 'STOP_RECORDING' || msg?.type === 'FINALIZE_RECORDING') {
     handleStopRecording(msg, sendResponse);
+    return true;
+  }
+
+  if (msg?.type === 'PAUSE_RECORDING') {
+    if (offscreenPort && lastKnownRecording) {
+      postToOffscreen({ type: 'OFFSCREEN_PAUSE' }).then(
+        () => sendResponse({ ok: true }),
+        (err) => sendResponse({ ok: false, error: String(err) })
+      );
+    } else {
+      sendResponse({ ok: false, error: 'Not recording' });
+    }
+    return true;
+  }
+
+  if (msg?.type === 'RESUME_RECORDING') {
+    if (offscreenPort && lastKnownRecording) {
+      postToOffscreen({ type: 'OFFSCREEN_RESUME' }).then(
+        () => sendResponse({ ok: true }),
+        (err) => sendResponse({ ok: false, error: String(err) })
+      );
+    } else {
+      sendResponse({ ok: false, error: 'Not recording' });
+    }
     return true;
   }
 

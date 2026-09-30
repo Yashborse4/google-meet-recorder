@@ -14,6 +14,8 @@ import { getSettings, saveSettings, ExtensionSettings } from './settings';
 const micBtn = document.getElementById('enable-mic') as HTMLButtonElement | null;
 const micDesc = document.getElementById('mic-desc') as HTMLDivElement | null;
 const startBtn = document.getElementById('start-rec') as HTMLButtonElement | null;
+const pauseBtn = document.getElementById('pause-rec') as HTMLButtonElement | null;
+const resumeBtn = document.getElementById('resume-rec') as HTMLButtonElement | null;
 const stopBtn = document.getElementById('stop-rec') as HTMLButtonElement | null;
 
 const statusPill = document.getElementById('status-pill') as HTMLDivElement | null;
@@ -55,16 +57,25 @@ function formatDuration(ms: number): string {
   return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 }
 
-function setUI(recording: boolean, startedAt?: number) {
+function setUI(recording: boolean, startedAt?: number, paused = false) {
   if (!startBtn || !stopBtn) return;
   startBtn.disabled = recording;
   stopBtn.disabled = !recording;
+  if (pauseBtn) pauseBtn.disabled = !recording || paused;
+  if (resumeBtn) resumeBtn.disabled = !recording || !paused;
 
   if (recording) {
     startBtn.style.display = 'none';
     stopBtn.style.display = 'flex';
-    if (statusPill) statusPill.classList.add('recording');
-    if (statusText) statusText.textContent = 'REC LIVE';
+    if (pauseBtn) pauseBtn.style.display = paused ? 'none' : 'flex';
+    if (resumeBtn) resumeBtn.style.display = paused ? 'flex' : 'none';
+
+    if (statusPill) {
+      statusPill.classList.add('recording');
+      if (paused) statusPill.style.opacity = '0.7';
+      else statusPill.style.opacity = '1';
+    }
+    if (statusText) statusText.textContent = paused ? 'PAUSED' : 'REC LIVE';
     if (timerCard) timerCard.classList.add('active');
 
     const effectiveStart = startedAt && startedAt > 0 ? startedAt : Date.now();
@@ -73,18 +84,30 @@ function setUI(recording: boolean, startedAt?: number) {
       startTimeInfo.innerHTML = `Started at: <strong>${timeStr}</strong>`;
     }
 
-    if (!liveTimerInterval) {
-      const updateTimer = () => {
-        const elapsed = Date.now() - effectiveStart;
-        if (timerDigits) timerDigits.textContent = formatDuration(elapsed);
-      };
-      updateTimer();
-      liveTimerInterval = window.setInterval(updateTimer, 1000);
+    const elapsed = Date.now() - effectiveStart;
+    if (timerDigits) timerDigits.textContent = formatDuration(elapsed);
+
+    if (!paused) {
+      if (!liveTimerInterval) {
+        liveTimerInterval = window.setInterval(() => {
+          const curElapsed = Date.now() - effectiveStart;
+          if (timerDigits) timerDigits.textContent = formatDuration(curElapsed);
+        }, 1000);
+      }
+    } else if (liveTimerInterval) {
+      clearInterval(liveTimerInterval);
+      liveTimerInterval = null;
     }
   } else {
     startBtn.style.display = 'flex';
     stopBtn.style.display = 'none';
-    if (statusPill) statusPill.classList.remove('recording');
+    if (pauseBtn) pauseBtn.style.display = 'none';
+    if (resumeBtn) resumeBtn.style.display = 'none';
+
+    if (statusPill) {
+      statusPill.classList.remove('recording');
+      statusPill.style.opacity = '1';
+    }
     if (statusText) statusText.textContent = 'Idle';
     if (timerCard) timerCard.classList.remove('active');
     if (timerDigits) timerDigits.textContent = '00:00';
@@ -307,7 +330,7 @@ discardBtn?.addEventListener('click', async () => {
 void (async () => {
   try {
     const st = await chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATUS' });
-    setUI(!!st?.recording, st?.startedAt);
+    setUI(!!st?.recording, st?.startedAt, !!st?.paused);
   } catch {
     setUI(false);
   }
@@ -318,7 +341,7 @@ void (async () => {
 
 // Listen for background state broadcasts
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === 'RECORDING_STATE') setUI(!!msg.recording, msg.startedAt);
+  if (msg?.type === 'RECORDING_STATE') setUI(!!msg.recording, msg.startedAt, !!msg.paused);
   if (msg?.type === 'RECORDING_SAVED') {
     toast(`Video saved: ${msg.filename || 'recording.webm'}`);
     setUI(false);
@@ -443,6 +466,32 @@ stopBtn?.addEventListener('click', async () => {
     console.error('[popup] STOP_RECORDING error', e);
     alert(`Failed to stop recording:\n${e?.message || e}`);
     setUI(false);
+  } finally {
+    inFlight = false;
+  }
+});
+
+pauseBtn?.addEventListener('click', async () => {
+  if (inFlight) return;
+  inFlight = true;
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'PAUSE_RECORDING' });
+    if (!resp?.ok) throw new Error(resp?.error || 'Failed to pause');
+  } catch (e) {
+    console.error(e);
+  } finally {
+    inFlight = false;
+  }
+});
+
+resumeBtn?.addEventListener('click', async () => {
+  if (inFlight) return;
+  inFlight = true;
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'RESUME_RECORDING' });
+    if (!resp?.ok) throw new Error(resp?.error || 'Failed to resume');
+  } catch (e) {
+    console.error(e);
   } finally {
     inFlight = false;
   }

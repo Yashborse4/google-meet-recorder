@@ -67,6 +67,8 @@ document.addEventListener('visibilitychange', () => {
 // --- 1. In-Viewport Floating Badge ---
 let floatingBadge: HTMLDivElement | null = null;
 let floatingTimerEl: HTMLSpanElement | null = null;
+let floatingLabelEl: HTMLSpanElement | null = null;
+let floatingDotEl: HTMLSpanElement | null = null;
 
 function createFloatingBadge() {
   if (document.getElementById('gmeet-rec-floating-badge')) return;
@@ -96,8 +98,8 @@ function createFloatingBadge() {
   `;
 
   // Pulsing red dot
-  const dot = document.createElement('span');
-  dot.style.cssText = `
+  floatingDotEl = document.createElement('span');
+  floatingDotEl.style.cssText = `
     width: 10px;
     height: 10px;
     border-radius: 50%;
@@ -128,9 +130,9 @@ function createFloatingBadge() {
     document.head.appendChild(styleEl);
   }
 
-  const label = document.createElement('span');
-  label.textContent = 'REC';
-  label.style.cssText = 'color: #ea4335; font-weight: 700; letter-spacing: 0.5px;';
+  floatingLabelEl = document.createElement('span');
+  floatingLabelEl.textContent = 'REC';
+  floatingLabelEl.style.cssText = 'color: #ea4335; font-weight: 700; letter-spacing: 0.5px;';
 
   floatingTimerEl = document.createElement('span');
   floatingTimerEl.textContent = '00:00';
@@ -140,8 +142,8 @@ function createFloatingBadge() {
   stopHint.title = 'Stop recording';
   stopHint.style.cssText = 'margin-left: 6px; font-size: 11px; opacity: 0.7;';
 
-  floatingBadge.appendChild(dot);
-  floatingBadge.appendChild(label);
+  floatingBadge.appendChild(floatingDotEl);
+  floatingBadge.appendChild(floatingLabelEl);
   floatingBadge.appendChild(floatingTimerEl);
   floatingBadge.appendChild(stopHint);
 
@@ -156,10 +158,12 @@ function createFloatingBadge() {
 }
 
 // --- 2. Google Meet Recording State & WakeLock Management ---
-function updateRecordingUI(recording: boolean) {
+let isPaused = false;
+function updateRecordingUI(recording: boolean, paused: boolean = false) {
   isRecording = recording;
+  isPaused = paused;
 
-  if (recording) {
+  if (recording && !paused) {
     requestScreenWakeLock().catch(() => {});
   } else {
     releaseScreenWakeLock();
@@ -167,16 +171,47 @@ function updateRecordingUI(recording: boolean) {
 
   if (floatingBadge) {
     floatingBadge.style.display = recording ? 'flex' : 'none';
+    if (paused) {
+      floatingBadge.style.opacity = '0.7';
+      if (floatingLabelEl) {
+        floatingLabelEl.textContent = 'PAUSED';
+        floatingLabelEl.style.color = '#f59e0b';
+      }
+      if (floatingDotEl) {
+        floatingDotEl.style.backgroundColor = '#f59e0b';
+        floatingDotEl.style.boxShadow = 'none';
+        floatingDotEl.style.animation = 'none';
+      }
+    } else {
+      floatingBadge.style.opacity = '1';
+      if (floatingLabelEl) {
+        floatingLabelEl.textContent = 'REC';
+        floatingLabelEl.style.color = '#ea4335';
+      }
+      if (floatingDotEl) {
+        floatingDotEl.style.backgroundColor = '#ea4335';
+        floatingDotEl.style.boxShadow = '0 0 8px #ea4335';
+        floatingDotEl.style.animation = 'gmeet-rec-pulse 1.4s infinite';
+      }
+    }
   }
 
   if (recording) {
-    if (!timerInterval) {
-      if (!recordingStartTime) recordingStartTime = Date.now();
-      timerInterval = window.setInterval(() => {
-        const elapsed = Date.now() - recordingStartTime;
-        const formatted = formatDuration(elapsed);
-        if (floatingTimerEl) floatingTimerEl.textContent = formatted;
-      }, 1000);
+    if (!recordingStartTime) recordingStartTime = Date.now();
+    const elapsed = Date.now() - recordingStartTime;
+    if (floatingTimerEl) floatingTimerEl.textContent = formatDuration(elapsed);
+
+    if (!paused) {
+      if (!timerInterval) {
+        timerInterval = window.setInterval(() => {
+          const curElapsed = Date.now() - recordingStartTime;
+          const formatted = formatDuration(curElapsed);
+          if (floatingTimerEl) floatingTimerEl.textContent = formatted;
+        }, 1000);
+      }
+    } else if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
     }
   } else {
     if (timerInterval) {
@@ -230,6 +265,7 @@ const normalize = (pre: string) =>
   pre.toLowerCase().replace(/[.,?!'"\u2019]/g, '').replace(/\s+/g, ' ').trim();
 
 function handleCaption(speakerKey: string, speakerName: string, rawText: string) {
+  if (isPaused) return; // Do not record captions while paused
   const text = rawText.trim();
   if (!text) return;
 
@@ -417,9 +453,17 @@ window.addEventListener('beforeunload', () => {
 // Offline / Network disconnect resilience
 window.addEventListener('offline', () => {
   console.warn('[MeetContentScript] Internet connection dropped. Recording will continue locally.');
+  if (floatingBadge) {
+    floatingBadge.style.borderColor = '#F59E0B'; // Orange for warning
+    floatingBadge.title = 'Offline - Recording locally';
+  }
 });
 window.addEventListener('online', () => {
   console.log('[MeetContentScript] Internet connection restored.');
+  if (floatingBadge) {
+    floatingBadge.style.borderColor = 'rgba(234, 67, 53, 0.6)'; // Restore red
+    floatingBadge.title = '';
+  }
 });
 
 // --- Master DOM Observer ---
@@ -583,7 +627,7 @@ function init() {
       }
       if (res?.recording) {
         if (res.startedAt) recordingStartTime = res.startedAt;
-        updateRecordingUI(true);
+        updateRecordingUI(true, !!res.paused);
       }
     });
   } catch {}
@@ -601,7 +645,7 @@ if (document.readyState === 'loading') {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'RECORDING_STATE') {
     if (msg.startedAt) recordingStartTime = msg.startedAt;
-    updateRecordingUI(!!msg.recording);
+    updateRecordingUI(!!msg.recording, !!msg.paused);
     sendResponse({ ok: true });
     return false;
   }

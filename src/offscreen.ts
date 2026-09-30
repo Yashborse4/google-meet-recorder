@@ -96,6 +96,7 @@ let activeSessionId: string | null = null;
 let sessionStartTime = 0;
 let chunkSequence = 0;
 let capturing = false;
+let isPaused = false;
 
 let audioContext: AudioContext | null = null;
 let micGainNode: GainNode | null = null;
@@ -311,7 +312,7 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string, sour
   }
 
   // Initialize unique session in MeetRecorderDB
-  activeSessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  activeSessionId = crypto.randomUUID();
   sessionStartTime = Date.now();
   chunkSequence = 0;
 
@@ -344,7 +345,8 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string, sour
     mediaRecorder!.onstart = () => {
       clearTimeout(startTimeout);
       capturing = true;
-      pushState(true, { sessionId: activeSessionId, startedAt: sessionStartTime });
+      isPaused = false;
+      pushState(true, { sessionId: activeSessionId, startedAt: sessionStartTime, paused: false });
       log('MediaRecorder started with 5s timeslice chunking');
       resolve();
     };
@@ -461,6 +463,7 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string, sour
         pendingChunkWrites.clear();
         cleanupStreams();
         capturing = false;
+        isPaused = false;
         activeSessionId = null;
         pushState(false);
       }
@@ -475,10 +478,10 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string, sour
     log('Captured tab video track ended');
     if (mediaRecorder && capturing) {
       try {
-        if (mediaRecorder.state === 'recording') {
+        if (mediaRecorder.state === 'recording' || mediaRecorder.state === 'paused') {
           try { mediaRecorder.requestData(); } catch {}
+          mediaRecorder.stop();
         }
-        mediaRecorder.stop();
       } catch {}
     }
   });
@@ -510,7 +513,7 @@ function stopRecording() {
     return;
   }
   try {
-    if (mediaRecorder.state === 'recording') {
+    if (mediaRecorder.state === 'recording' || mediaRecorder.state === 'paused') {
       try { mediaRecorder.requestData(); } catch {}
       mediaRecorder.stop();
       log('mediaRecorder.stop() successfully executed');
@@ -554,9 +557,36 @@ function attachRpcListener(port: chrome.runtime.Port): void {
         }
       }
 
+      if (msg?.type === 'OFFSCREEN_PAUSE') {
+        try {
+          if (!mediaRecorder || mediaRecorder.state !== 'recording') throw new Error('Not recording');
+          mediaRecorder.pause();
+          isPaused = true;
+          pushState(true, { sessionId: activeSessionId, startedAt: sessionStartTime, paused: true });
+          log('mediaRecorder.pause() executed');
+          return respond(msg, { ok: true });
+        } catch (e: any) {
+          return respond(msg, { ok: false, error: String(e?.message || e) });
+        }
+      }
+
+      if (msg?.type === 'OFFSCREEN_RESUME') {
+        try {
+          if (!mediaRecorder || mediaRecorder.state !== 'paused') throw new Error('Not paused');
+          mediaRecorder.resume();
+          isPaused = false;
+          pushState(true, { sessionId: activeSessionId, startedAt: sessionStartTime, paused: false });
+          log('mediaRecorder.resume() executed');
+          return respond(msg, { ok: true });
+        } catch (e: any) {
+          return respond(msg, { ok: false, error: String(e?.message || e) });
+        }
+      }
+
       if (msg?.type === 'OFFSCREEN_STATUS') {
         return respond(msg, {
           recording: capturing,
+          paused: isPaused,
           sessionId: activeSessionId,
           startedAt: sessionStartTime,
         });

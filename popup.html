@@ -369,6 +369,28 @@
         border-color: #636772;
       }
 
+      button.btn-pause {
+        background: #2e3035;
+        color: #ffb74d;
+        border: 1px solid #4a4e57;
+      }
+      button.btn-pause:hover:not(:disabled) {
+        background: #3b3d44;
+        color: #ffffff;
+        border-color: #636772;
+      }
+
+      button.btn-resume {
+        background: #1b5e20;
+        color: #81c995;
+        border: 1px solid #2e7d32;
+      }
+      button.btn-resume:hover:not(:disabled) {
+        background: #2e7d32;
+        color: #ffffff;
+        border-color: #4caf50;
+      }
+
       .auto-save-pill {
         display: flex;
         align-items: center;
@@ -641,6 +663,21 @@
               <circle cx="12" cy="12" r="10" />
             </svg>
             Start Recording (Tab)
+          </button>
+
+          <button id="pause-rec" class="main-btn btn-pause" style="display: none;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="6" y="5" width="4" height="14" rx="1" />
+              <rect x="14" y="5" width="4" height="14" rx="1" />
+            </svg>
+            Pause
+          </button>
+
+          <button id="resume-rec" class="main-btn btn-resume" style="display: none;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="5 3 19 12 5 21 5 3" />
+            </svg>
+            Resume
           </button>
 
           <button id="stop-rec" class="main-btn btn-stop" disabled style="display: none;">
