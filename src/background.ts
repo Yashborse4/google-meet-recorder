@@ -447,9 +447,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       try {
         const hasOff = await hasOffscreenContext();
-        if (hasOff) {
-          await ensureOffscreen();
-          const st = await postToOffscreen({ type: 'OFFSCREEN_STATUS' });
+        if (hasOff && offscreenPort && offscreenReady) {
+          // Fast path: port is already connected, query with a short timeout
+          const st = await Promise.race([
+            postToOffscreen({ type: 'OFFSCREEN_STATUS' }),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+          ]);
           if (st) {
             lastKnownRecording = !!st.recording;
             lastKnownPaused = !!st.paused;
@@ -457,10 +460,52 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             if (st.startedAt) activeRecordingStartTime = st.startedAt;
             if (st.realStartTime) activeRecordingRealStartTime = st.realStartTime;
           }
+        } else if (hasOff) {
+          // Slow path: port not connected yet, try to reconnect with timeout
+          try {
+            await Promise.race([
+              ensureOffscreen(),
+              new Promise<void>((_, reject) => setTimeout(() => reject(new Error('ensureOffscreen timeout')), 3000)),
+            ]);
+            const st = await Promise.race([
+              postToOffscreen({ type: 'OFFSCREEN_STATUS' }),
+              new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+            ]);
+            if (st) {
+              lastKnownRecording = !!st.recording;
+              lastKnownPaused = !!st.paused;
+              if (st.sessionId) activeRecordingSessionId = st.sessionId;
+              if (st.startedAt) activeRecordingStartTime = st.startedAt;
+              if (st.realStartTime) activeRecordingRealStartTime = st.realStartTime;
+            }
+          } catch (e) {
+            bglog('GET_RECORDING_STATUS slow path failed:', e);
+          }
         }
       } catch (e) {
         bglog('Error in GET_RECORDING_STATUS offscreen query:', e);
       }
+
+      // Fallback: if we still don't know, check chrome.storage.session
+      if (!lastKnownRecording) {
+        try {
+          const stored: any = await new Promise((resolve) => {
+            (chrome.storage as any)?.session?.get?.(
+              ['recording', 'paused', 'sessionId', 'startedAt', 'realStartTime'],
+              (r: any) => resolve(r || {})
+            );
+          });
+          if (stored?.recording) {
+            lastKnownRecording = true;
+            lastKnownPaused = !!stored.paused;
+            if (stored.sessionId) activeRecordingSessionId = stored.sessionId;
+            if (stored.startedAt) activeRecordingStartTime = stored.startedAt;
+            if (stored.realStartTime) activeRecordingRealStartTime = stored.realStartTime;
+            bglog('Recovered recording state from chrome.storage.session');
+          }
+        } catch {}
+      }
+
       sendResponse({
         recording: lastKnownRecording,
         paused: lastKnownPaused,
@@ -576,6 +621,22 @@ async function handleStartRecording(msg: any, sender: chrome.runtime.MessageSend
     const targetTabId = typeof msg.tabId === 'number' ? msg.tabId : sender.tab?.id;
     if (typeof targetTabId !== 'number') {
       sendResponse({ ok: false, error: 'Target tabId not provided' });
+      return;
+    }
+
+    // Guard: If we already have an active recording, reject immediately and report actual state
+    if (lastKnownRecording || activeRecordingTabId !== null) {
+      bglog('START_RECORDING rejected: already recording tabId', activeRecordingTabId);
+      sendResponse({
+        ok: false,
+        error: 'Already recording',
+        alreadyRecording: true,
+        recording: lastKnownRecording,
+        paused: lastKnownPaused,
+        tabId: activeRecordingTabId,
+        startedAt: activeRecordingStartTime,
+        realStartTime: activeRecordingRealStartTime,
+      });
       return;
     }
 

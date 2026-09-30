@@ -77,7 +77,13 @@ function respond(req: any, payload: any) {
 
 function pushState(recording: boolean, extra?: Record<string, any>) {
   try {
-    (chrome.storage as any)?.session?.set?.({ recording }).catch?.(() => {});
+    (chrome.storage as any)?.session?.set?.({
+      recording,
+      paused: !!extra?.paused,
+      sessionId: extra?.sessionId || null,
+      startedAt: extra?.startedAt || 0,
+      realStartTime: extra?.realStartTime || 0,
+    }).catch?.(() => {});
   } catch {}
   getPort().postMessage({ type: 'RECORDING_STATE', recording, ...extra });
 }

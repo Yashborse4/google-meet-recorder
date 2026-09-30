@@ -412,6 +412,16 @@ startBtn?.addEventListener('click', async () => {
   startBtn.disabled = true;
 
   try {
+    // Pre-flight: check if a recording is already active before attempting tab capture
+    try {
+      const preCheck = await chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATUS' });
+      if (preCheck?.recording) {
+        // Recording is active — just fix the UI to match reality
+        setUI(true, preCheck.startedAt, !!preCheck.paused, preCheck.realStartTime);
+        return;
+      }
+    } catch {}
+
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) throw new Error('No active tab found.');
 
@@ -458,6 +468,11 @@ startBtn?.addEventListener('click', async () => {
     });
 
     if (!resp) throw new Error('No response from background service worker');
+    // If background says already recording, fix UI silently
+    if (resp.alreadyRecording) {
+      setUI(true, resp.startedAt, !!resp.paused, resp.realStartTime);
+      return;
+    }
     if (resp.ok === false) throw new Error(resp.error || 'Failed to start recording');
 
     setUI(true);
