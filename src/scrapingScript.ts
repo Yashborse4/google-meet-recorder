@@ -250,10 +250,13 @@ function findMeetMicButton(): HTMLElement | null {
   // Priority 2: Look specifically inside the bottom controls bar / footer container for data-is-muted
   const bottomBar = document.querySelector('footer, div[role="region"][aria-label*="control" i], [data-unhovered-bottom-bar]');
   if (bottomBar) {
-    const btnInBar = bottomBar.querySelector<HTMLElement>('button[data-is-muted], [role="button"][data-is-muted]');
-    if (btnInBar) {
-      cachedMicBtn = btnInBar;
-      return btnInBar;
+    const btnsInBar = bottomBar.querySelectorAll<HTMLElement>('button[data-is-muted], [role="button"][data-is-muted]');
+    for (const btn of btnsInBar) {
+      const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+      if (!aria.includes('camera') && !aria.includes('video') && !aria.includes('cam')) {
+        cachedMicBtn = btn;
+        return btn;
+      }
     }
   }
 

@@ -122,6 +122,10 @@ let audioContext: AudioContext | null = null;
 let micGainNode: GainNode | null = null;
 let currentMicTrack: MediaStreamTrack | null = null;
 let currentMixedStream: MediaStream | null = null;
+let currentTabStream: MediaStream | null = null;
+let currentMicStream: MediaStream | null = null;
+let tabAudioMediaStream: MediaStream | null = null;
+let micAudioMediaStream: MediaStream | null = null;
 let tabAudioSourceNode: MediaStreamAudioSourceNode | null = null;
 let micAudioSourceNode: MediaStreamAudioSourceNode | null = null;
 let mixedDestNode: MediaStreamAudioDestinationNode | null = null;
@@ -132,11 +136,17 @@ let isMicEnabledBySetting = true;
 
 function updateMicState() {
   const shouldRecordMic = isMicEnabledBySetting && !isMeetMuted;
-  if (micGainNode && audioContext) {
-    const now = audioContext.currentTime;
-    micGainNode.gain.cancelScheduledValues(now);
-    // Smooth 15ms exponential transition prevents clicks, pops, and audio discontinuities
-    micGainNode.gain.setTargetAtTime(shouldRecordMic ? 1.0 : 0.0, now, 0.015);
+  if (micGainNode && audioContext && audioContext.state !== 'closed') {
+    try {
+      const now = audioContext.currentTime;
+      micGainNode.gain.cancelScheduledValues(now);
+      // Smooth 15ms exponential transition prevents clicks, pops, and audio discontinuities
+      micGainNode.gain.setTargetAtTime(shouldRecordMic ? 1.0 : 0.0, now, 0.015);
+    } catch {
+      try {
+        micGainNode.gain.value = shouldRecordMic ? 1.0 : 0.0;
+      } catch {}
+    }
   }
   // CRITICAL: We do NOT toggle currentMicTrack.enabled = false!
   // Keeping track.enabled = true keeps the WebRTC audio thread streaming without buffer resets.
@@ -214,12 +224,16 @@ async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream |
     }
   };
 
+  currentTabStream = tabStream;
+  currentMicStream = micStream;
+
   mixedDestNode = audioContext.createMediaStreamDestination();
 
   // 1. Route Tab Audio IMMEDIATELY
   if (tabAudio) {
     try {
-      tabAudioSourceNode = audioContext.createMediaStreamSource(new MediaStream([tabAudio]));
+      tabAudioMediaStream = new MediaStream([tabAudio]);
+      tabAudioSourceNode = audioContext.createMediaStreamSource(tabAudioMediaStream);
       // Only route to local speakers when using tabCapture (Chrome auto-mutes the tab).
       // With desktopCapture, the tab still plays audio natively — routing to speakers would echo.
       if (source === 'tab') {
@@ -244,7 +258,8 @@ async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream |
       currentMicTrack = micTrack;
       micTrack.enabled = true;
       try {
-        micAudioSourceNode = audioContext.createMediaStreamSource(new MediaStream([micTrack]));
+        micAudioMediaStream = new MediaStream([micTrack]);
+        micAudioSourceNode = audioContext.createMediaStreamSource(micAudioMediaStream);
         micGainNode = audioContext.createGain();
 
         // Enforce settings and Google Meet mute status
@@ -557,6 +572,18 @@ function cleanupStreams() {
     currentMixedStream?.getTracks().forEach((t) => t.stop());
   } catch {}
   try {
+    currentTabStream?.getTracks().forEach((t) => t.stop());
+  } catch {}
+  try {
+    currentMicStream?.getTracks().forEach((t) => t.stop());
+  } catch {}
+  try {
+    tabAudioMediaStream?.getTracks().forEach((t) => t.stop());
+  } catch {}
+  try {
+    micAudioMediaStream?.getTracks().forEach((t) => t.stop());
+  } catch {}
+  try {
     currentMicTrack?.stop();
   } catch {}
   try {
@@ -568,6 +595,10 @@ function cleanupStreams() {
     audioContext?.close().catch?.(() => {});
   } catch {}
 
+  currentTabStream = null;
+  currentMicStream = null;
+  tabAudioMediaStream = null;
+  micAudioMediaStream = null;
   tabAudioSourceNode = null;
   micAudioSourceNode = null;
   mixedDestNode = null;
