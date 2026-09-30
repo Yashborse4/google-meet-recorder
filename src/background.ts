@@ -417,7 +417,21 @@ chrome.commands?.onCommand.addListener(async (command) => {
           const pathParts = new URL(tab.url).pathname.split('/');
           meetingId = pathParts[pathParts.length - 1] || 'google-meet';
         }
-        const r = await postToOffscreen({ type: 'OFFSCREEN_START', streamId: captureInfo.streamId, source: captureInfo.source, meetingId });
+
+        // Query current Meet mute state beforehand so offscreen starts with zero audio clipping
+        let initialMuted = false;
+        try {
+          const muteCheck = await new Promise<{ isMuted?: boolean }>((resolve) => {
+            chrome.tabs.sendMessage(tab.id!, { type: 'QUERY_MUTE_STATE' }, (res) => {
+              if (chrome.runtime.lastError || !res) resolve({});
+              else resolve(res);
+            });
+            setTimeout(() => resolve({}), 250);
+          });
+          if (typeof muteCheck.isMuted === 'boolean') initialMuted = muteCheck.isMuted;
+        } catch {}
+
+        const r = await postToOffscreen({ type: 'OFFSCREEN_START', streamId: captureInfo.streamId, source: captureInfo.source, meetingId, initialMuted });
         if (r?.ok) {
           activeRecordingTabId = tab.id;
           activeRecordingStartTime = Date.now();
@@ -425,7 +439,7 @@ chrome.commands?.onCommand.addListener(async (command) => {
           activeRecordingSessionId = r.sessionId;
           broadcastState(true);
 
-          // Query current Meet mute state to ensure initial sync
+          // Follow-up query in case of late UI load
           chrome.tabs.sendMessage(tab.id, { type: 'QUERY_MUTE_STATE' }, (res) => {
             if (chrome.runtime.lastError) return;
             if (res && typeof res.isMuted === 'boolean') {
@@ -668,7 +682,20 @@ async function handleStartRecording(msg: any, sender: chrome.runtime.MessageSend
         }
       } catch {}
 
-      const r = await postToOffscreen({ type: 'OFFSCREEN_START', streamId, source, meetingId });
+      // Query current Meet mute state beforehand so offscreen starts with zero audio clipping
+      let initialMuted = false;
+      try {
+        const muteCheck = await new Promise<{ isMuted?: boolean }>((resolve) => {
+          chrome.tabs.sendMessage(targetTabId, { type: 'QUERY_MUTE_STATE' }, (res) => {
+            if (chrome.runtime.lastError || !res) resolve({});
+            else resolve(res);
+          });
+          setTimeout(() => resolve({}), 250);
+        });
+        if (typeof muteCheck.isMuted === 'boolean') initialMuted = muteCheck.isMuted;
+      } catch {}
+
+      const r = await postToOffscreen({ type: 'OFFSCREEN_START', streamId, source, meetingId, initialMuted });
       if (r?.ok) {
         activeRecordingTabId = targetTabId;
         activeRecordingSessionId = r.sessionId;
@@ -676,7 +703,7 @@ async function handleStartRecording(msg: any, sender: chrome.runtime.MessageSend
         activeRecordingRealStartTime = activeRecordingStartTime;
         broadcastState(true);
 
-        // Query current Meet mute state to guarantee instant synchronization
+        // Follow-up query in case of late UI load
         chrome.tabs.sendMessage(targetTabId, { type: 'QUERY_MUTE_STATE' }, (res) => {
           if (chrome.runtime.lastError) return;
           if (res && typeof res.isMuted === 'boolean') {

@@ -223,24 +223,46 @@ function updateRecordingUI(recording: boolean, paused: boolean = false) {
 }
 
 // --- 3. Google Meet Mute Sync Observer ("Hot Mic" Privacy Protection) ---
-function findMeetMicButton(): HTMLElement | null {
-  // 1. Direct data-is-muted attribute (Google Meet standard attribute)
-  const withData = document.querySelector<HTMLElement>('button[data-is-muted], div[data-is-muted], [role="button"][data-is-muted]');
-  if (withData) return withData;
+let cachedMicBtn: HTMLElement | null = null;
+let micObserver: MutationObserver | null = null;
 
-  // 2. Button with standard hotkey in aria-label (Ctrl+D / ⌘+D is unique to mic in Google Meet across languages)
+function findMeetMicButton(): HTMLElement | null {
+  // If we already cached a valid, connected mic button in the DOM, use it
+  if (cachedMicBtn && cachedMicBtn.isConnected) {
+    return cachedMicBtn;
+  }
+
+  // Priority 1: The user's bottom-bar mic button containing the unique shortcut (Ctrl+D / ⌘+D).
+  // Google Meet tooltips across ALL languages include (Ctrl+D) or (⌘+D) exclusively on the local mic button.
+  // This guarantees we NEVER accidentally select a remote participant's tile or mute badge!
   const allButtons = document.querySelectorAll<HTMLElement>('button, div[role="button"]');
   for (const b of allButtons) {
     const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-    if ((aria.includes('ctrl + d') || aria.includes('ctrl+d') || aria.includes('⌘ + d') || aria.includes('⌘+d')) && !aria.includes('camera') && !aria.includes('video')) {
+    const tooltip = (b.getAttribute('data-tooltip') || '').toLowerCase();
+    const label = `${aria} ${tooltip}`;
+    if ((label.includes('ctrl + d') || label.includes('ctrl+d') || label.includes('⌘ + d') || label.includes('⌘+d')) &&
+        !label.includes('camera') && !label.includes('video')) {
+      cachedMicBtn = b;
       return b;
     }
   }
 
-  // 3. Fallback: aria-label containing "microphone" / language variants
+  // Priority 2: Look specifically inside the bottom controls bar / footer container for data-is-muted
+  const bottomBar = document.querySelector('footer, div[role="region"][aria-label*="control" i], [data-unhovered-bottom-bar]');
+  if (bottomBar) {
+    const btnInBar = bottomBar.querySelector<HTMLElement>('button[data-is-muted], [role="button"][data-is-muted]');
+    if (btnInBar) {
+      cachedMicBtn = btnInBar;
+      return btnInBar;
+    }
+  }
+
+  // Priority 3: Fallback button with microphone in aria-label, excluding settings, options, devices, and participants
   for (const b of allButtons) {
     const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-    if ((aria.includes('microphone') || aria.includes('micrófono') || aria.includes('microfone') || aria.includes('mikrofon') || aria.includes('micro')) && !aria.includes('setting') && !aria.includes('option') && !aria.includes('device') && !aria.includes('more')) {
+    if ((aria.includes('microphone') || aria.includes('micrófono') || aria.includes('microfone') || aria.includes('mikrofon') || aria.includes('micro')) &&
+        !aria.includes('setting') && !aria.includes('option') && !aria.includes('device') && !aria.includes('more') && !aria.includes('participant')) {
+      cachedMicBtn = b;
       return b;
     }
   }
@@ -251,32 +273,58 @@ function findMeetMicButton(): HTMLElement | null {
 function getMeetMuteState(): boolean {
   const micBtn = findMeetMicButton();
   if (!micBtn) {
-    // If mic button cannot be located (e.g. lobby or loading), default to MUTED (closed) for safety
-    return true;
+    // CRITICAL ROOT-CAUSE FIX:
+    // When Google Meet's control bar auto-hides after ~3s of mouse inactivity, micBtn may be momentarily unqueryable.
+    // If we returned true (muted), the user's voice would break every time the UI idles!
+    // We retain lastKnownMuteState so voice NEVER drops due to UI auto-hiding.
+    if (lastKnownMuteState !== null) {
+      return lastKnownMuteState;
+    }
+    return false; // Default to unmuted so voice is not silenced
   }
 
-  // 1. Check data-is-muted attribute
+  // 1. Direct data-is-muted attribute
   const dataMuted = micBtn.getAttribute('data-is-muted') || micBtn.closest('[data-is-muted]')?.getAttribute('data-is-muted');
   if (dataMuted !== null && dataMuted !== undefined) {
     return dataMuted === 'true';
   }
 
-  // 2. Check aria-label
+  // 2. Check aria-label / tooltip
   const aria = (micBtn.getAttribute('aria-label') || '').toLowerCase();
+  const tooltip = (micBtn.getAttribute('data-tooltip') || '').toLowerCase();
+  const combined = `${aria} ${tooltip}`;
+
   // In Meet: "Turn on microphone" means it is currently MUTED.
-  // "Turn off microphone" means it is currently UNMUTED (open).
-  if (aria.includes('turn on') || aria.includes('unmute') || aria.includes('activar') || aria.includes('ativar') || aria.includes('activer') || aria.includes('einschalten')) {
+  if (combined.includes('turn on') || combined.includes('unmute') || combined.includes('activar') ||
+      combined.includes('ativar') || combined.includes('activer') || combined.includes('einschalten')) {
     return true;
   }
-  if (aria.includes('turn off') || aria.includes('mute') || aria.includes('desactivar') || aria.includes('désactiver') || aria.includes('ausschalten') || aria.includes('stumm')) {
+  // "Turn off microphone" means it is currently UNMUTED (open).
+  if (combined.includes('turn off') || combined.includes('mute') || combined.includes('desactivar') ||
+      combined.includes('désactiver') || combined.includes('ausschalten') || combined.includes('stumm')) {
     return false;
   }
 
-  // Default to muted if uncertain
-  return true;
+  // If uncertain, retain last known state if available, or default to false (unmuted)
+  return lastKnownMuteState !== null ? lastKnownMuteState : false;
+}
+
+function attachMicButtonObserver(btn: HTMLElement) {
+  if (micObserver) {
+    try { micObserver.disconnect(); } catch {}
+  }
+  micObserver = new MutationObserver(() => {
+    checkMeetMuteState();
+  });
+  micObserver.observe(btn, { attributes: true, attributeFilter: ['data-is-muted', 'aria-label', 'data-tooltip'] });
 }
 
 function checkMeetMuteState(force = false) {
+  const micBtn = findMeetMicButton();
+  if (micBtn && (!micObserver || cachedMicBtn !== micBtn)) {
+    attachMicButtonObserver(micBtn);
+  }
+
   const isMuted = getMeetMuteState();
   if (force || lastKnownMuteState !== isMuted) {
     lastKnownMuteState = isMuted;

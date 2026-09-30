@@ -122,19 +122,25 @@ let audioContext: AudioContext | null = null;
 let micGainNode: GainNode | null = null;
 let currentMicTrack: MediaStreamTrack | null = null;
 let currentMixedStream: MediaStream | null = null;
+let tabAudioSourceNode: MediaStreamAudioSourceNode | null = null;
+let micAudioSourceNode: MediaStreamAudioSourceNode | null = null;
+let mixedDestNode: MediaStreamAudioDestinationNode | null = null;
 
-// Default to MUTED (closed): never capture mic until Google Meet explicitly confirms mic is open!
-let isMeetMuted = true;
+// Default to unmuted so speech onset is never clipped at recording start
+let isMeetMuted = false;
 let isMicEnabledBySetting = true;
 
 function updateMicState() {
   const shouldRecordMic = isMicEnabledBySetting && !isMeetMuted;
   if (micGainNode && audioContext) {
-    micGainNode.gain.setValueAtTime(shouldRecordMic ? 1.0 : 0.0, audioContext.currentTime);
+    const now = audioContext.currentTime;
+    micGainNode.gain.cancelScheduledValues(now);
+    // Smooth 15ms exponential transition prevents clicks, pops, and audio discontinuities
+    micGainNode.gain.setTargetAtTime(shouldRecordMic ? 1.0 : 0.0, now, 0.015);
   }
-  if (currentMicTrack) {
-    currentMicTrack.enabled = shouldRecordMic;
-  }
+  // CRITICAL: We do NOT toggle currentMicTrack.enabled = false!
+  // Keeping track.enabled = true keeps the WebRTC audio thread streaming without buffer resets.
+  // The GainNode cleanly and sample-accurately manages mute state in the mixed recording stream.
   log(`Mic state updated: recording=${shouldRecordMic} (settingEnabled=${isMicEnabledBySetting}, meetMuted=${isMeetMuted})`);
 }
 
@@ -147,12 +153,21 @@ async function maybeGetMicStream(): Promise<MediaStream | null> {
   try {
     const mic = await navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: settings.noiseSuppression,
-        noiseSuppression: settings.noiseSuppression,
-        autoGainControl: settings.noiseSuppression,
+        channelCount: { ideal: 1 },
+        sampleRate: { ideal: 48000 },
+        // CRITICAL FOR VOICE CLARITY & PREVENTING DROPOUTS:
+        // 1. echoCancellation: false — Google Meet's tab already performs full AEC. A second AEC in offscreen
+        //    mistakenly ducks and chops vocal frequencies against tab audio.
+        // 2. autoGainControl: false — Browser AGC aggressively clamps initial speech syllables ("breaks" voice onset).
+        echoCancellation: false,
+        autoGainControl: false,
+        noiseSuppression: !!settings.noiseSuppression,
       },
     });
     const t = mic.getAudioTracks()[0];
+    if (t) {
+      t.enabled = true;
+    }
     log('Mic stream acquired:', !!t, 'muted:', t?.muted, 'enabled:', t?.enabled);
     return mic;
   } catch (e) {
@@ -184,7 +199,8 @@ async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream |
   }
 
   const AC = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext;
-  audioContext = new AC();
+  // Explicitly specify 48000 Hz and interactive latency to eliminate real-time sample-rate conversion jitter
+  audioContext = new AC({ sampleRate: 48000, latencyHint: 'interactive' });
 
   // Autoplay Policy & Suspension Protection
   if (audioContext.state === 'suspended') {
@@ -198,22 +214,22 @@ async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream |
     }
   };
 
-  const mixedDest = audioContext.createMediaStreamDestination();
+  mixedDestNode = audioContext.createMediaStreamDestination();
 
-  // 1. Route Tab Audio
+  // 1. Route Tab Audio IMMEDIATELY
   if (tabAudio) {
     try {
-      const tabSource = audioContext.createMediaStreamSource(new MediaStream([tabAudio]));
+      tabAudioSourceNode = audioContext.createMediaStreamSource(new MediaStream([tabAudio]));
       // Only route to local speakers when using tabCapture (Chrome auto-mutes the tab).
       // With desktopCapture, the tab still plays audio natively — routing to speakers would echo.
       if (source === 'tab') {
-        tabSource.connect(audioContext.destination);
+        tabAudioSourceNode.connect(audioContext.destination);
         log('Tab audio connected to speakers (tabCapture: tab is auto-muted by Chrome)');
       } else {
         log('Tab audio NOT connected to speakers (desktopCapture: tab still plays natively, would echo)');
       }
       // Always route to recorder destination
-      tabSource.connect(mixedDest);
+      tabAudioSourceNode.connect(mixedDestNode);
       log('Tab audio connected to recorder destination');
     } catch (err) {
       log('Tab audio source connection failed; using raw tab audio', err);
@@ -226,8 +242,9 @@ async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream |
     const micTrack = micStream.getAudioTracks()[0];
     if (micTrack) {
       currentMicTrack = micTrack;
+      micTrack.enabled = true;
       try {
-        const micSource = audioContext.createMediaStreamSource(new MediaStream([micTrack]));
+        micAudioSourceNode = audioContext.createMediaStreamSource(new MediaStream([micTrack]));
         micGainNode = audioContext.createGain();
 
         // Enforce settings and Google Meet mute status
@@ -235,9 +252,9 @@ async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream |
         isMicEnabledBySetting = !!settings.autoMixMic;
         updateMicState();
 
-        micSource.connect(micGainNode);
+        micAudioSourceNode.connect(micGainNode);
         // Connect exclusively to recorder destination. NEVER connect to audioContext.destination!
-        micGainNode.connect(mixedDest);
+        micGainNode.connect(mixedDestNode);
         log(`Mic audio connected (sidetone prevented, initial state: ${!isMeetMuted && isMicEnabledBySetting ? 'OPEN' : 'MUTED/SILENCED'})`);
       } catch (err) {
         log('Mic audio routing failed:', err);
@@ -245,7 +262,7 @@ async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream |
     }
   }
 
-  return new MediaStream([...videoTracks, ...mixedDest.stream.getAudioTracks()]);
+  return new MediaStream([...videoTracks, ...mixedDestNode.stream.getAudioTracks()]);
 }
 
 function makeConstraints(streamId: string, source: 'tab' | 'desktop', quality: '1080p' | '720p' | 'max' = '1080p'): MediaStreamConstraints {
@@ -297,7 +314,18 @@ async function captureWithStreamId(streamId: string, source: 'tab' | 'desktop'):
   }
 }
 
-async function prepareAndRecord(baseStream: MediaStream, meetingId: string, source: 'tab' | 'desktop' = 'tab'): Promise<void> {
+async function prepareAndRecord(streamId: string, source: 'tab' | 'desktop' = 'tab', meetingId: string = 'google-meet'): Promise<void> {
+  const settings = await getSettings();
+
+  // Parallel capture: tabCapture and mic getUserMedia in parallel eliminates the 1-2s audio dropout
+  const [baseStream, micStream] = await Promise.all([
+    captureWithStreamId(streamId, source),
+    maybeGetMicStream().catch((e) => {
+      log('Mic stream capture error (continuing tab-only):', e);
+      return null;
+    }),
+  ]);
+
   const videoTracks = baseStream.getVideoTracks();
   if (!videoTracks.length) throw new Error('No video track found in captured stream');
 
@@ -310,8 +338,6 @@ async function prepareAndRecord(baseStream: MediaStream, meetingId: string, sour
     }
   }
 
-  const settings = await getSettings();
-  const micStream = await maybeGetMicStream();
   const mixedStream = await setupAudioMixing(baseStream, micStream, source);
   currentMixedStream = mixedStream;
 
@@ -534,15 +560,23 @@ function cleanupStreams() {
     currentMicTrack?.stop();
   } catch {}
   try {
+    tabAudioSourceNode?.disconnect();
+    micAudioSourceNode?.disconnect();
+    micGainNode?.disconnect();
+  } catch {}
+  try {
     audioContext?.close().catch?.(() => {});
   } catch {}
 
+  tabAudioSourceNode = null;
+  micAudioSourceNode = null;
+  mixedDestNode = null;
   currentMixedStream = null;
   currentMicTrack = null;
   micGainNode = null;
   audioContext = null;
   mediaRecorder = null;
-  isMeetMuted = true;
+  isMeetMuted = false;
 }
 
 function stopRecording() {
@@ -572,14 +606,16 @@ function attachRpcListener(port: chrome.runtime.Port): void {
         const streamId = msg.streamId as string | undefined;
         const source = msg.source as 'tab' | 'desktop' | undefined;
         const meetingId = (msg.meetingId as string | undefined) || 'google-meet';
+        const initialMuted = typeof msg.initialMuted === 'boolean' ? msg.initialMuted : false;
         if (!streamId || !source) return respond(msg, { ok: false, error: 'Missing streamId or source' });
 
         try {
           if (capturing) {
             return respond(msg, { ok: false, error: 'Already recording' });
           }
-          const baseStream = await captureWithStreamId(streamId, source);
-          await prepareAndRecord(baseStream, meetingId, source);
+          isMeetMuted = initialMuted;
+          log(`OFFSCREEN_START initialized with isMeetMuted=${isMeetMuted}`);
+          await prepareAndRecord(streamId, source, meetingId);
           return respond(msg, { ok: true, sessionId: activeSessionId });
         } catch (e: any) {
           return respond(msg, { ok: false, error: `${e?.name || 'Error'}: ${e?.message || e}` });
