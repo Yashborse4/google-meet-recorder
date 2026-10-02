@@ -83,10 +83,9 @@ function createFloatingBadge() {
     display: none;
     align-items: center;
     gap: 8px;
-    background: rgba(32, 33, 36, 0.92);
+    background: rgba(32, 33, 36, 0.85);
     border: 1px solid rgba(234, 67, 53, 0.6);
     color: #ffffff;
-    padding: 6px 14px;
     border-radius: 24px;
     font-family: 'Google Sans', Roboto, Arial, sans-serif;
     font-size: 13px;
@@ -94,7 +93,15 @@ function createFloatingBadge() {
     box-shadow: 0 4px 16px rgba(0,0,0,0.4);
     cursor: pointer;
     user-select: none;
-    transition: opacity 0.2s ease, transform 0.2s ease;
+    
+    /* Collapsed state */
+    height: 32px;
+    max-width: 32px;
+    padding: 0 10px;
+    box-sizing: border-box;
+    overflow: hidden;
+    white-space: nowrap;
+    transition: max-width 0.4s cubic-bezier(0.25, 1, 0.5, 1), padding 0.3s ease, background-color 0.2s ease;
   `;
 
   // Pulsing red dot
@@ -107,6 +114,7 @@ function createFloatingBadge() {
     display: inline-block;
     box-shadow: 0 0 8px #ea4335;
     animation: gmeet-rec-pulse 1.4s infinite;
+    flex-shrink: 0;
   `;
 
   // Inject CSS animation
@@ -123,12 +131,30 @@ function createFloatingBadge() {
         from { transform: translateY(-12px); opacity: 0; }
         to { transform: translateY(0); opacity: 1; }
       }
-      .gmeet-rec-btn-hover:hover {
-        background-color: rgba(234, 67, 53, 0.15) !important;
+      #gmeet-rec-floating-badge:hover {
+        max-width: 200px !important;
+        padding: 0 14px !important;
+        background: rgba(32, 33, 36, 0.98) !important;
+      }
+      .gmeet-rec-text-wrapper {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        opacity: 0;
+        transform: translateX(-5px);
+        transition: opacity 0.3s ease, transform 0.3s ease;
+      }
+      #gmeet-rec-floating-badge:hover .gmeet-rec-text-wrapper {
+        opacity: 1;
+        transform: translateX(0);
+        transition-delay: 0.1s;
       }
     `;
     document.head.appendChild(styleEl);
   }
+
+  const textWrapper = document.createElement('div');
+  textWrapper.className = 'gmeet-rec-text-wrapper';
 
   floatingLabelEl = document.createElement('span');
   floatingLabelEl.textContent = 'REC';
@@ -142,10 +168,12 @@ function createFloatingBadge() {
   stopHint.title = 'Stop recording';
   stopHint.style.cssText = 'margin-left: 6px; font-size: 11px; opacity: 0.7;';
 
+  textWrapper.appendChild(floatingLabelEl);
+  textWrapper.appendChild(floatingTimerEl);
+  textWrapper.appendChild(stopHint);
+
   floatingBadge.appendChild(floatingDotEl);
-  floatingBadge.appendChild(floatingLabelEl);
-  floatingBadge.appendChild(floatingTimerEl);
-  floatingBadge.appendChild(stopHint);
+  floatingBadge.appendChild(textWrapper);
 
   floatingBadge.addEventListener('click', () => {
     if (isRecording) {
