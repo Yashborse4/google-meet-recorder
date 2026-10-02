@@ -162,12 +162,26 @@ chrome.runtime.onConnect.addListener((port) => {
       if (msg.sessionId) activeRecordingSessionId = msg.sessionId;
       if (msg.startedAt) activeRecordingStartTime = msg.startedAt;
       if (msg.realStartTime) activeRecordingRealStartTime = msg.realStartTime;
+      
       if (!lastKnownRecording) {
         activeRecordingTabId = null;
         activeRecordingSessionId = null;
         activeRecordingStartTime = 0;
         activeRecordingRealStartTime = 0;
+      } else if (activeRecordingTabId === null) {
+        // Service worker might have been suspended and lost activeRecordingTabId in memory.
+        // Recover it from session storage asynchronously.
+        try {
+          (chrome.storage as any)?.session?.get?.(['tabId'], (res: any) => {
+            if (res && res.tabId) {
+              activeRecordingTabId = res.tabId;
+              bglog('Recovered activeRecordingTabId from session storage:', activeRecordingTabId);
+              broadcastState(lastKnownRecording, { ...msg, tabId: activeRecordingTabId });
+            }
+          });
+        } catch {}
       }
+      
       broadcastState(lastKnownRecording, msg);
     }
 
@@ -505,7 +519,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const stored: any = await new Promise((resolve) => {
             (chrome.storage as any)?.session?.get?.(
-              ['recording', 'paused', 'sessionId', 'startedAt', 'realStartTime'],
+              ['recording', 'paused', 'sessionId', 'startedAt', 'realStartTime', 'tabId'],
               (r: any) => resolve(r || {})
             );
           });
@@ -515,6 +529,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             if (stored.sessionId) activeRecordingSessionId = stored.sessionId;
             if (stored.startedAt) activeRecordingStartTime = stored.startedAt;
             if (stored.realStartTime) activeRecordingRealStartTime = stored.realStartTime;
+            if (stored.tabId) activeRecordingTabId = stored.tabId;
             bglog('Recovered recording state from chrome.storage.session');
           }
         } catch {}
@@ -701,6 +716,11 @@ async function handleStartRecording(msg: any, sender: chrome.runtime.MessageSend
         activeRecordingSessionId = r.sessionId;
         activeRecordingStartTime = Date.now();
         activeRecordingRealStartTime = activeRecordingStartTime;
+        
+        try {
+          (chrome.storage as any)?.session?.set?.({ tabId: targetTabId });
+        } catch {}
+
         broadcastState(true);
 
         // Follow-up query in case of late UI load
@@ -757,9 +777,28 @@ async function handleStopRecording(msg: any, sendResponse: (res: any) => void) {
   }
 }
 
+// Helper to check memory state or fallback to session storage for critical tab events
+async function checkRecordingTabMatch(tabId: number): Promise<{ isMatch: boolean, isRecording: boolean }> {
+  let targetTabId = activeRecordingTabId;
+  let isRecording = lastKnownRecording;
+  if (!isRecording) {
+    try {
+      const stored: any = await new Promise((resolve) => {
+        (chrome.storage as any)?.session?.get?.(['recording', 'tabId'], (res: any) => resolve(res || {}));
+      });
+      if (stored?.recording && stored?.tabId) {
+        isRecording = stored.recording;
+        targetTabId = stored.tabId;
+      }
+    } catch {}
+  }
+  return { isMatch: tabId === targetTabId, isRecording };
+}
+
 // Auto-finalize recording if user closes the active recorded Meet tab
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  if (tabId === activeRecordingTabId && lastKnownRecording) {
+  const match = await checkRecordingTabMatch(tabId);
+  if (match.isMatch && match.isRecording) {
     const settings = await getSettings();
     if (!settings.autoStopOnExit) {
       bglog(`Recorded tab ${tabId} was closed, but autoStopOnExit is disabled in settings.`);
@@ -767,9 +806,8 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
     }
     bglog(`Recorded tab ${tabId} was closed. Auto-stopping recording...`);
     try {
-      if (offscreenPort) {
-        await postToOffscreen({ type: 'OFFSCREEN_STOP' });
-      }
+      if (!offscreenPort) await ensureOffscreen();
+      await postToOffscreen({ type: 'OFFSCREEN_STOP' });
     } catch (e) {
       bglog('Failed to auto-stop on tab close:', e);
     }
@@ -778,13 +816,13 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 
 // Auto-finalize recording and release microphone if recorded tab navigates away from Google Meet
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
-  if (tabId === activeRecordingTabId && lastKnownRecording && changeInfo.url) {
-    if (!changeInfo.url.includes('meet.google.com')) {
-      bglog(`Recorded tab ${tabId} navigated away from Google Meet (${changeInfo.url}). Auto-stopping recording and releasing mic...`);
+  if (changeInfo.url) {
+    const match = await checkRecordingTabMatch(tabId);
+    if (match.isMatch && match.isRecording && !changeInfo.url.includes('meet.google.com')) {
+      bglog(`Recorded tab ${tabId} navigated away from Google Meet (${changeInfo.url}). Auto-stopping...`);
       try {
-        if (offscreenPort) {
-          await postToOffscreen({ type: 'OFFSCREEN_STOP' });
-        }
+        if (!offscreenPort) await ensureOffscreen();
+        await postToOffscreen({ type: 'OFFSCREEN_STOP' });
       } catch (e) {
         bglog('Failed to auto-stop on tab navigation:', e);
       }

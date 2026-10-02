@@ -280,22 +280,28 @@ recoverBtn?.addEventListener('click', async () => {
     const timestamp = Date.now();
     const ext = mime.includes('mp4') ? 'mp4' : 'webm';
 
+    const recoverySettings = await getSettings();
+
     chrome.downloads.download({
       url: videoUrl,
       filename: `GoogleMeet-Recovered-${suffix}-${timestamp}.${ext}`,
       saveAs: true,
     }, () => {
-      chrome.downloads.download({
-        url: txtUrl,
-        filename: `GoogleMeet-Recovered-Transcript-${suffix}-${timestamp}.txt`,
-        saveAs: false,
-      });
+      if (recoverySettings.saveTxtTranscript) {
+        chrome.downloads.download({
+          url: txtUrl,
+          filename: `GoogleMeet-Recovered-Transcript-${suffix}-${timestamp}.txt`,
+          saveAs: false,
+        });
+      }
 
-      chrome.downloads.download({
-        url: vttUrl,
-        filename: `GoogleMeet-Recovered-Transcript-${suffix}-${timestamp}.vtt`,
-        saveAs: false,
-      });
+      if (recoverySettings.saveVttSubtitles) {
+        chrome.downloads.download({
+          url: vttUrl,
+          filename: `GoogleMeet-Recovered-Transcript-${suffix}-${timestamp}.vtt`,
+          saveAs: false,
+        });
+      }
     });
 
     // Cleanup session from IndexedDB after downloads initiate

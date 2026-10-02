@@ -130,28 +130,95 @@ let tabAudioSourceNode: MediaStreamAudioSourceNode | null = null;
 let micAudioSourceNode: MediaStreamAudioSourceNode | null = null;
 let mixedDestNode: MediaStreamAudioDestinationNode | null = null;
 
+// Track capture source to decide whether tab audio passthrough should be preserved after recording stops.
+// With 'tab' capture Chrome auto-mutes the tab, so we keep the AudioContext→speakers path alive.
+let currentCaptureSource: 'tab' | 'desktop' = 'tab';
+
 // Default to unmuted so speech onset is never clipped at recording start
 let isMeetMuted = false;
 let isMicEnabledBySetting = true;
 
-function updateMicState() {
-  const shouldRecordMic = isMicEnabledBySetting && !isMeetMuted;
-  if (micGainNode && audioContext && audioContext.state !== 'closed') {
-    try {
-      const now = audioContext.currentTime;
-      micGainNode.gain.cancelScheduledValues(now);
-      // Smooth 15ms exponential transition prevents clicks, pops, and audio discontinuities
-      micGainNode.gain.setTargetAtTime(shouldRecordMic ? 1.0 : 0.0, now, 0.015);
-    } catch {
-      try {
-        micGainNode.gain.value = shouldRecordMic ? 1.0 : 0.0;
-      } catch {}
+let isMicStateUpdating = false;
+let pendingMicStateUpdate = false;
+
+async function updateMicState() {
+  if (isMicStateUpdating) {
+    pendingMicStateUpdate = true;
+    return;
+  }
+  isMicStateUpdating = true;
+
+  try {
+    const shouldRecordMic = isMicEnabledBySetting && !isMeetMuted;
+    
+    if (shouldRecordMic) {
+      if (!currentMicStream && audioContext && audioContext.state !== 'closed') {
+        log('Mic needed. Acquiring microphone hardware dynamically...');
+        const stream = await maybeGetMicStream();
+        if (stream) {
+          // Double check if we still need it after await
+          if (!(isMicEnabledBySetting && !isMeetMuted)) {
+            stream.getTracks().forEach((t) => t.stop());
+          } else {
+            currentMicStream = stream;
+            const micTrack = stream.getAudioTracks()[0];
+            if (micTrack) {
+              currentMicTrack = micTrack;
+              try {
+                micAudioMediaStream = new MediaStream([micTrack]);
+                micAudioSourceNode = audioContext.createMediaStreamSource(micAudioMediaStream);
+                micGainNode = audioContext.createGain();
+                micGainNode.gain.value = 1.0;
+                micAudioSourceNode.connect(micGainNode);
+                if (mixedDestNode) {
+                  micGainNode.connect(mixedDestNode);
+                }
+                log('Mic audio connected dynamically');
+              } catch (err) {
+                log('Mic audio routing failed:', err);
+              }
+            }
+          }
+        }
+      } else if (micGainNode && audioContext) {
+        try {
+          const now = audioContext.currentTime;
+          micGainNode.gain.cancelScheduledValues(now);
+          micGainNode.gain.setTargetAtTime(1.0, now, 0.015);
+        } catch {}
+      }
+    } else {
+      if (currentMicStream) {
+        log('Mic not needed. Releasing microphone hardware...');
+        if (micGainNode && audioContext) {
+          try {
+            const now = audioContext.currentTime;
+            micGainNode.gain.cancelScheduledValues(now);
+            micGainNode.gain.setTargetAtTime(0.0, now, 0.015);
+          } catch {}
+        }
+        // Give a tiny delay for gain node to fade out before destroying to avoid pop
+        await new Promise((r) => setTimeout(r, 50));
+        try { currentMicStream?.getTracks().forEach((t) => t.stop()); } catch {}
+        try { currentMicTrack?.stop(); } catch {}
+        try { micAudioSourceNode?.disconnect(); } catch {}
+        try { micGainNode?.disconnect(); } catch {}
+        
+        currentMicStream = null;
+        currentMicTrack = null;
+        micAudioMediaStream = null;
+        micAudioSourceNode = null;
+        micGainNode = null;
+        log('Microphone hardware released');
+      }
+    }
+  } finally {
+    isMicStateUpdating = false;
+    if (pendingMicStateUpdate) {
+      pendingMicStateUpdate = false;
+      updateMicState();
     }
   }
-  // CRITICAL: We do NOT toggle currentMicTrack.enabled = false!
-  // Keeping track.enabled = true keeps the WebRTC audio thread streaming without buffer resets.
-  // The GainNode cleanly and sample-accurately manages mute state in the mixed recording stream.
-  log(`Mic state updated: recording=${shouldRecordMic} (settingEnabled=${isMicEnabledBySetting}, meetMuted=${isMeetMuted})`);
 }
 
 // Microphone capture
@@ -218,9 +285,12 @@ async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream |
     await audioContext.resume().catch((err) => log('AudioContext resume failed:', err));
   }
   audioContext.onstatechange = () => {
-    if (audioContext && audioContext.state === 'suspended' && capturing) {
-      log('AudioContext auto-resuming from suspended state');
-      audioContext.resume().catch(() => {});
+    if (audioContext && audioContext.state === 'suspended') {
+      // Resume if currently recording OR if tab audio passthrough is still active
+      if (capturing || tabAudioSourceNode) {
+        log('AudioContext auto-resuming from suspended state');
+        audioContext.resume().catch(() => {});
+      }
     }
   };
 
@@ -256,26 +326,24 @@ async function setupAudioMixing(tabStream: MediaStream, micStream: MediaStream |
     const micTrack = micStream.getAudioTracks()[0];
     if (micTrack) {
       currentMicTrack = micTrack;
-      micTrack.enabled = true;
       try {
         micAudioMediaStream = new MediaStream([micTrack]);
         micAudioSourceNode = audioContext.createMediaStreamSource(micAudioMediaStream);
         micGainNode = audioContext.createGain();
-
-        // Enforce settings and Google Meet mute status
-        const settings = await getSettings();
-        isMicEnabledBySetting = !!settings.autoMixMic;
-        updateMicState();
-
+        micGainNode.gain.value = 1.0;
         micAudioSourceNode.connect(micGainNode);
-        // Connect exclusively to recorder destination. NEVER connect to audioContext.destination!
         micGainNode.connect(mixedDestNode);
-        log(`Mic audio connected (sidetone prevented, initial state: ${!isMeetMuted && isMicEnabledBySetting ? 'OPEN' : 'MUTED/SILENCED'})`);
+        log('Initial mic audio connected');
       } catch (err) {
         log('Mic audio routing failed:', err);
       }
     }
   }
+
+  // Enforce settings and Google Meet mute status
+  const settings = await getSettings();
+  isMicEnabledBySetting = !!settings.autoMixMic;
+  updateMicState();
 
   return new MediaStream([...videoTracks, ...mixedDestNode.stream.getAudioTracks()]);
 }
@@ -330,15 +398,20 @@ async function captureWithStreamId(streamId: string, source: 'tab' | 'desktop'):
 }
 
 async function prepareAndRecord(streamId: string, source: 'tab' | 'desktop' = 'tab', meetingId: string = 'google-meet'): Promise<void> {
+  // Clean up any lingering tab audio passthrough from a previous recording session
+  cleanupTabPassthrough();
+
+  currentCaptureSource = source;
   const settings = await getSettings();
 
   // Parallel capture: tabCapture and mic getUserMedia in parallel eliminates the 1-2s audio dropout
+  const shouldInitialRecordMic = settings.autoMixMic && !isMeetMuted;
   const [baseStream, micStream] = await Promise.all([
     captureWithStreamId(streamId, source),
-    maybeGetMicStream().catch((e) => {
+    shouldInitialRecordMic ? maybeGetMicStream().catch((e) => {
       log('Mic stream capture error (continuing tab-only):', e);
       return null;
-    }),
+    }) : Promise.resolve(null),
   ]);
 
   const videoTracks = baseStream.getVideoTracks();
@@ -539,11 +612,29 @@ async function prepareAndRecord(streamId: string, source: 'tab' | 'desktop' = 't
         log('Finalization error:', err);
       } finally {
         pendingChunkWrites.clear();
-        cleanupStreams();
+        // With tab capture, Chrome auto-mutes the tab — keep the AudioContext→speakers
+        // path alive so the user continues hearing remote participants after recording stops.
+        const keepTab = currentCaptureSource === 'tab';
+        cleanupStreams(keepTab);
         capturing = false;
         isPaused = false;
         activeSessionId = null;
         pushState(false);
+
+        // Deferred cleanup: when the tab audio track ends naturally (tab closed / navigated),
+        // tear down the remaining passthrough resources automatically.
+        if (keepTab && currentTabStream) {
+          const passThroughTrack = currentTabStream.getAudioTracks()[0];
+          if (passThroughTrack && passThroughTrack.readyState === 'live') {
+            passThroughTrack.addEventListener('ended', () => {
+              log('Tab audio passthrough track ended, cleaning up');
+              cleanupTabPassthrough();
+            }, { once: true });
+          } else {
+            // Track already ended, clean up immediately
+            cleanupTabPassthrough();
+          }
+        }
       }
     };
   });
@@ -567,45 +658,68 @@ async function prepareAndRecord(streamId: string, source: 'tab' | 'desktop' = 't
   await started;
 }
 
-function cleanupStreams() {
-  try {
-    currentMixedStream?.getTracks().forEach((t) => t.stop());
-  } catch {}
-  try {
-    currentTabStream?.getTracks().forEach((t) => t.stop());
-  } catch {}
-  try {
-    currentMicStream?.getTracks().forEach((t) => t.stop());
-  } catch {}
-  try {
-    tabAudioMediaStream?.getTracks().forEach((t) => t.stop());
-  } catch {}
-  try {
-    micAudioMediaStream?.getTracks().forEach((t) => t.stop());
-  } catch {}
-  try {
-    currentMicTrack?.stop();
-  } catch {}
-  try {
-    tabAudioSourceNode?.disconnect();
-    micAudioSourceNode?.disconnect();
-    micGainNode?.disconnect();
-  } catch {}
-  try {
-    audioContext?.close().catch?.(() => {});
-  } catch {}
-
+/**
+ * Clean up lingering tab audio passthrough resources.
+ * Called when the tab audio track ends naturally (tab closed / navigated) or when starting a new recording.
+ */
+function cleanupTabPassthrough() {
+  try { currentTabStream?.getTracks().forEach((t) => t.stop()); } catch {}
+  try { tabAudioMediaStream?.getTracks().forEach((t) => t.stop()); } catch {}
+  try { tabAudioSourceNode?.disconnect(); } catch {}
+  try { audioContext?.close().catch?.(() => {}); } catch {}
   currentTabStream = null;
-  currentMicStream = null;
   tabAudioMediaStream = null;
-  micAudioMediaStream = null;
   tabAudioSourceNode = null;
+  audioContext = null;
+  log('Tab audio passthrough cleaned up');
+}
+
+/**
+ * @param keepTabAudio  When true (tab capture source), the tab audio track and AudioContext
+ *                      remain alive so the user continues hearing remote participants via
+ *                      audioContext.destination (speakers). Chrome auto-mutes the tab during
+ *                      tab capture, so killing the AudioContext mid-capture leaves silence.
+ *                      When false (desktop capture or full teardown), everything is stopped.
+ */
+function cleanupStreams(keepTabAudio: boolean = false) {
+  if (!keepTabAudio) {
+    try { currentMixedStream?.getTracks().forEach((t) => t.stop()); } catch {}
+    try { currentTabStream?.getTracks().forEach((t) => t.stop()); } catch {}
+    try { tabAudioMediaStream?.getTracks().forEach((t) => t.stop()); } catch {}
+  }
+  try { currentMicStream?.getTracks().forEach((t) => t.stop()); } catch {}
+  try { micAudioMediaStream?.getTracks().forEach((t) => t.stop()); } catch {}
+  try { currentMicTrack?.stop(); } catch {}
+
+  // Audio node disconnection
+  if (keepTabAudio) {
+    // Selectively disconnect tab audio from mixer only; keep speakers connection intact
+    try {
+      if (tabAudioSourceNode && mixedDestNode) {
+        tabAudioSourceNode.disconnect(mixedDestNode);
+      }
+    } catch {}
+  } else {
+    try { tabAudioSourceNode?.disconnect(); } catch {}
+  }
+  try { micAudioSourceNode?.disconnect(); } catch {}
+  try { micGainNode?.disconnect(); } catch {}
+
+  if (!keepTabAudio) {
+    try { audioContext?.close().catch?.(() => {}); } catch {}
+    currentTabStream = null;
+    tabAudioMediaStream = null;
+    tabAudioSourceNode = null;
+    audioContext = null;
+  }
+
+  currentMicStream = null;
+  micAudioMediaStream = null;
   micAudioSourceNode = null;
   mixedDestNode = null;
   currentMixedStream = null;
   currentMicTrack = null;
   micGainNode = null;
-  audioContext = null;
   mediaRecorder = null;
   isMeetMuted = false;
 }
